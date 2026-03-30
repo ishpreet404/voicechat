@@ -67,7 +67,15 @@
 						</p>
 					</label>
 				</div>
-				<p id="backendStatus" class="hint status-line">Backend: checking...</p>
+				<button
+					id="backendStatus"
+					class="backend-status-btn checking"
+					type="button"
+					aria-live="polite"
+					aria-label="Backend status checking"
+				>
+					Backend: Checking
+				</button>
 				<button id="joinBtn" class="primary" type="button">
 					Enter Voice Room
 				</button>
@@ -92,7 +100,9 @@
 					</div>
 				</div>
 
-				<p id="statusText" class="status">Starting microphone...</p>
+				<p id="statusText" class="status" aria-live="polite">
+					Starting microphone...
+				</p>
 
 				<ul id="participants" class="participant-list"></ul>
 

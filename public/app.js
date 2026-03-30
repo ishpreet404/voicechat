@@ -29,6 +29,9 @@ let mutedBeforeDeafen = false;
 let currentRoomId = "";
 let joinInProgress = false;
 let discoveredServerUrl = "";
+let backendHealthDebounceTimer;
+let backendHealthInterval;
+let backendHealthRequestId = 0;
 
 const peerConnections = new Map();
 const screenSenders = new Map();
@@ -43,20 +46,26 @@ let rtcConfig = {
 };
 
 const PERMANENT_ROOM_KEY = "permanentRoomId";
+const BACKEND_HEALTH_CHECK_INTERVAL_MS = 30_000;
+const BACKEND_HEALTH_CHECK_TIMEOUT_MS = 4_500;
+const SCREEN_SHARE_MAX_BITRATE = 8_000_000;
 
-function isLocalhost() {
-	return (
-		window.location.hostname === "localhost" ||
-		window.location.hostname === "127.0.0.1"
-	);
-}
+function setBackendStatus(state = "checking") {
+	const safeState = ["connected", "disconnected", "checking"].includes(state)
+		? state
+		: "checking";
+	const labelByState = {
+		connected: "Connected",
+		disconnected: "Disconnected",
+		checking: "Checking",
+	};
 
-function setBackendStatus(message, tone = "") {
-	backendStatus.textContent = message;
-	backendStatus.classList.remove("ok", "warn");
-	if (tone) {
-		backendStatus.classList.add(tone);
-	}
+	backendStatus.textContent = `Backend: ${labelByState[safeState]}`;
+	backendStatus.classList.remove("connected", "disconnected", "checking");
+	backendStatus.classList.add(safeState);
+	backendStatus.title = "Click to recheck backend status.";
+	backendStatus.setAttribute("aria-label", `Backend status ${labelByState[safeState]}`);
+	backendStatus.setAttribute("aria-busy", safeState === "checking" ? "true" : "false");
 }
 
 function setJoinInProgress(active) {
@@ -122,6 +131,29 @@ function sanitizeRoom(value) {
 	return value.trim().slice(0, 40);
 }
 
+function hostLooksLikeIpv4Address(host) {
+	return /^\d{1,3}(\.\d{1,3}){3}$/.test(host);
+}
+
+function shouldDefaultToHttp(rawHostValue) {
+	const hostValue = String(rawHostValue || "").trim().toLowerCase();
+	const host = hostValue.split("/")[0].split(":")[0];
+
+	if (!host) {
+		return false;
+	}
+
+	if (["localhost", "127.0.0.1", "0.0.0.0"].includes(host)) {
+		return true;
+	}
+
+	if (hostLooksLikeIpv4Address(host) || host.endsWith(".local")) {
+		return true;
+	}
+
+	return false;
+}
+
 function normalizeServerUrl(value) {
 	const raw = String(value || "").trim();
 	if (!raw) {
@@ -130,10 +162,7 @@ function normalizeServerUrl(value) {
 
 	let withProtocol = raw;
 	if (!/^https?:\/\//i.test(withProtocol)) {
-		if (
-			withProtocol.startsWith("localhost") ||
-			withProtocol.startsWith("127.0.0.1")
-		) {
+		if (shouldDefaultToHttp(withProtocol)) {
 			withProtocol = `http://${withProtocol}`;
 		} else {
 			withProtocol = `https://${withProtocol}`;
@@ -193,7 +222,74 @@ function resolveSocketServerUrl() {
 		return discoveredServerUrl;
 	}
 
-	return "";
+	return window.location.origin;
+}
+
+async function checkBackendHealth({ showChecking = false } = {}) {
+	const requestId = ++backendHealthRequestId;
+	const serverUrl = resolveSocketServerUrl();
+	const manualInput = String(serverUrlInput.value || "").trim();
+	if (manualInput && !normalizeServerUrl(manualInput)) {
+		setBackendStatus("disconnected");
+		return false;
+	}
+
+	const isSameOriginBackend = serverUrl === window.location.origin;
+	const controller = new AbortController();
+	const timeout = setTimeout(() => {
+		controller.abort();
+	}, BACKEND_HEALTH_CHECK_TIMEOUT_MS);
+
+	if (showChecking) {
+		setBackendStatus("checking");
+	}
+
+	try {
+		const response = await fetch(`${serverUrl}/health`, {
+			cache: "no-store",
+			mode: isSameOriginBackend ? "same-origin" : "no-cors",
+			signal: controller.signal,
+		});
+		const isHealthy = isSameOriginBackend ? response.ok : true;
+
+		if (requestId === backendHealthRequestId) {
+			setBackendStatus(isHealthy ? "connected" : "disconnected");
+		}
+
+		return isHealthy;
+	} catch {
+		if (requestId === backendHealthRequestId) {
+			setBackendStatus("disconnected");
+		}
+
+		return false;
+	} finally {
+		clearTimeout(timeout);
+	}
+}
+
+function scheduleBackendHealthCheck(delayMs = 220) {
+	if (backendHealthDebounceTimer) {
+		clearTimeout(backendHealthDebounceTimer);
+	}
+
+	backendHealthDebounceTimer = setTimeout(() => {
+		checkBackendHealth({ showChecking: true }).catch(() => {
+			setBackendStatus("disconnected");
+		});
+	}, delayMs);
+}
+
+function startBackendHealthMonitor() {
+	if (backendHealthInterval) {
+		clearInterval(backendHealthInterval);
+	}
+
+	backendHealthInterval = setInterval(() => {
+		checkBackendHealth().catch(() => {
+			setBackendStatus("disconnected");
+		});
+	}, BACKEND_HEALTH_CHECK_INTERVAL_MS);
 }
 
 function updateParticipantList() {
@@ -241,6 +337,44 @@ function setStatus(message) {
 	statusText.textContent = message;
 }
 
+function toggleFullscreenForElement(element) {
+	if (!element?.requestFullscreen) {
+		return;
+	}
+
+	if (document.fullscreenElement === element) {
+		if (document.exitFullscreen) {
+			document.exitFullscreen().catch(() => {
+				// Ignore user-triggered fullscreen exit errors.
+			});
+		}
+		return;
+	}
+
+	element.requestFullscreen().catch(() => {
+		setStatus("Fullscreen is blocked by browser policy.");
+	});
+}
+
+function createScreenCaption(labelText, fullscreenTarget) {
+	const caption = document.createElement("figcaption");
+	const text = document.createElement("span");
+	text.textContent = labelText;
+
+	const fullscreenBtn = document.createElement("button");
+	fullscreenBtn.type = "button";
+	fullscreenBtn.className = "screen-fullscreen-btn";
+	fullscreenBtn.textContent = "Full Screen";
+	fullscreenBtn.setAttribute("aria-label", `Open full screen for ${labelText}`);
+	fullscreenBtn.addEventListener("click", () => {
+		toggleFullscreenForElement(fullscreenTarget);
+	});
+
+	caption.appendChild(text);
+	caption.appendChild(fullscreenBtn);
+	return caption;
+}
+
 function updateScreensEmptyState() {
 	const hasAnyScreen = remoteScreenCards.size > 0 || Boolean(localScreenCard);
 	screensEmpty.style.display = hasAnyScreen ? "none" : "block";
@@ -269,8 +403,10 @@ function ensureLocalScreenPreview(displayName) {
 	video.playsInline = true;
 	video.muted = true;
 
-	const caption = document.createElement("figcaption");
-	caption.textContent = `${displayName || "You"} - Your Screen`;
+	const caption = createScreenCaption(
+		`${displayName || "You"} - Your Screen`,
+		video,
+	);
 
 	figure.appendChild(video);
 	figure.appendChild(caption);
@@ -303,8 +439,7 @@ function ensureRemoteScreenCard(peerId, peerName) {
 	video.playsInline = true;
 	video.muted = localDeafened;
 
-	const caption = document.createElement("figcaption");
-	caption.textContent = `${peerName || "Guest"} - Screen`;
+	const caption = createScreenCaption(`${peerName || "Guest"} - Screen`, video);
 
 	figure.appendChild(video);
 	figure.appendChild(caption);
@@ -355,6 +490,7 @@ function setLocalMuteState(nextMuted, shouldEmit = true) {
 	}
 
 	muteBtn.textContent = localMuted ? "Unmute" : "Mute";
+	muteBtn.setAttribute("aria-pressed", localMuted ? "true" : "false");
 	updateParticipantList();
 
 	if (socket && shouldEmit) {
@@ -363,26 +499,7 @@ function setLocalMuteState(nextMuted, shouldEmit = true) {
 }
 
 function refreshBackendStatus() {
-	const manual = normalizeServerUrl(serverUrlInput.value);
-	if (manual) {
-		setBackendStatus(`Backend: ${manual}`, "ok");
-		return;
-	}
-
-	if (discoveredServerUrl) {
-		setBackendStatus(`Backend from Vercel env: ${discoveredServerUrl}`, "ok");
-		return;
-	}
-
-	if (isLocalhost()) {
-		setBackendStatus(`Backend: ${window.location.origin} (same origin)`, "ok");
-		return;
-	}
-
-	setBackendStatus(
-		"Backend not configured. Set Signal Server URL or Vercel env SIGNAL_SERVER_URL.",
-		"warn",
-	);
+	scheduleBackendHealthCheck();
 }
 
 async function initializeBackendConfig() {
@@ -396,10 +513,12 @@ async function initializeBackendConfig() {
 	if (!savedServerUrl) {
 		discoveredServerUrl = await discoverBackendUrl();
 		if (discoveredServerUrl) {
-			backendHint.textContent = `Auto-loaded from Vercel env: ${discoveredServerUrl}`;
+			backendHint.textContent =
+				"Auto-loaded from Vercel env SIGNAL_SERVER_URL.";
 		}
 	}
 
+	startBackendHealthMonitor();
 	refreshBackendStatus();
 }
 
@@ -445,8 +564,11 @@ function resetConnectionState() {
 	}
 
 	muteBtn.textContent = "Mute";
+	muteBtn.setAttribute("aria-pressed", "false");
 	deafenBtn.textContent = "Deafen";
+	deafenBtn.setAttribute("aria-pressed", "false");
 	shareBtn.textContent = "Share Screen";
+	shareBtn.setAttribute("aria-pressed", "false");
 	currentRoomId = "";
 	setJoinInProgress(false);
 	updateScreensEmptyState();
@@ -503,6 +625,17 @@ function attachScreenTrackToPeer(peerId, pc) {
 
 	const sender = pc.addTrack(videoTrack, localScreenStream);
 	screenSenders.set(peerId, sender);
+
+	const params = sender.getParameters();
+	if (!params.encodings || !params.encodings.length) {
+		params.encodings = [{}];
+	}
+	params.encodings[0].maxBitrate = SCREEN_SHARE_MAX_BITRATE;
+	params.encodings[0].maxFramerate = 60;
+
+	sender.setParameters(params).catch(() => {
+		// Some browsers reject custom sender parameters; keep defaults.
+	});
 }
 
 function createPeerConnection(peerId, peerName) {
@@ -636,16 +769,10 @@ async function joinRoom() {
 	const manualServerUrl = normalizeServerUrl(serverUrlInput.value);
 	const hasManualServerUrl = Boolean(serverUrlInput.value.trim());
 	const configuredServerUrl = resolveSocketServerUrl();
+	const hasExplicitServerUrl = Boolean(manualServerUrl || discoveredServerUrl);
 
 	if (hasManualServerUrl && !manualServerUrl) {
 		joinError.textContent = "Invalid signal server URL.";
-		return;
-	}
-
-	if (!configuredServerUrl && !isLocalhost()) {
-		joinError.textContent =
-			"Backend is not configured. Set SIGNAL_SERVER_URL in Vercel or enter Signal Server URL.";
-		setBackendStatus("Backend missing. Add Render URL before joining.", "warn");
 		return;
 	}
 
@@ -656,27 +783,20 @@ async function joinRoom() {
 		await startLocalAudio();
 		await loadRtcConfig(configuredServerUrl);
 
-		if (configuredServerUrl) {
+		if (hasExplicitServerUrl) {
 			localStorage.setItem("signalServerUrl", configuredServerUrl);
-			socket = io(configuredServerUrl, {
-				transports: ["websocket", "polling"],
-				timeout: 20000,
-				reconnection: true,
-				reconnectionAttempts: 25,
-				reconnectionDelay: 1000,
-				reconnectionDelayMax: 5000,
-			});
 		} else {
 			localStorage.removeItem("signalServerUrl");
-			socket = io({
-				transports: ["websocket", "polling"],
-				timeout: 20000,
-				reconnection: true,
-				reconnectionAttempts: 25,
-				reconnectionDelay: 1000,
-				reconnectionDelayMax: 5000,
-			});
 		}
+
+		socket = io(configuredServerUrl, {
+			transports: ["websocket", "polling"],
+			timeout: 20000,
+			reconnection: true,
+			reconnectionAttempts: 25,
+			reconnectionDelay: 1000,
+			reconnectionDelayMax: 5000,
+		});
 
 		let initialConnectDone = false;
 
@@ -692,10 +812,7 @@ async function joinRoom() {
 
 			socket.emit("join-room", { roomId, userName });
 			setStatus("Connected. Waiting for others...");
-			setBackendStatus(
-				`Backend connected: ${configuredServerUrl || window.location.origin}`,
-				"ok",
-			);
+			setBackendStatus("connected");
 			updateParticipantList();
 
 			joinPanel.classList.add("hidden");
@@ -707,13 +824,13 @@ async function joinRoom() {
 		socket.on("connect_error", (error) => {
 			if (initialConnectDone) {
 				setStatus("Connection lost. Trying to reconnect...");
-				setBackendStatus("Backend disconnected. Retrying...", "warn");
+				setBackendStatus("checking");
 				return;
 			}
 
 			joinError.textContent = `Unable to connect backend: ${error.message}`;
 			setStatus("Cannot reach backend server.");
-			setBackendStatus("Backend unavailable. Check Signal Server URL.", "warn");
+			setBackendStatus("disconnected");
 			setJoinInProgress(false);
 			resetConnectionState();
 			joinPanel.classList.remove("hidden");
@@ -845,12 +962,18 @@ async function joinRoom() {
 		socket.on("disconnect", () => {
 			if (currentRoomId) {
 				setStatus("Disconnected from room.");
-				setBackendStatus("Backend disconnected.", "warn");
+				setBackendStatus("disconnected");
 			}
 		});
 	} catch (error) {
 		joinError.textContent = `Unable to join: ${error.message}`;
-		setStatus("Microphone access is required.");
+		if (!window.isSecureContext) {
+			setStatus(
+				"Microphone access is blocked on insecure pages. Use HTTPS (or localhost).",
+			);
+		} else {
+			setStatus("Microphone access is required.");
+		}
 		setJoinInProgress(false);
 		resetConnectionState();
 		joinPanel.classList.remove("hidden");
@@ -879,6 +1002,7 @@ function toggleDeafen() {
 
 	localDeafened = !localDeafened;
 	deafenBtn.textContent = localDeafened ? "Undeafen" : "Deafen";
+	deafenBtn.setAttribute("aria-pressed", localDeafened ? "true" : "false");
 
 	if (localDeafened) {
 		mutedBeforeDeafen = localMuted;
@@ -914,6 +1038,7 @@ async function stopScreenShare(emitState = true) {
 	localScreenStream = undefined;
 	removeLocalScreenPreview();
 	shareBtn.textContent = "Share Screen";
+	shareBtn.setAttribute("aria-pressed", "false");
 
 	const self = participantState.get(socket.id);
 	if (self) {
@@ -934,7 +1059,9 @@ async function startScreenShare() {
 	try {
 		localScreenStream = await navigator.mediaDevices.getDisplayMedia({
 			video: {
-				frameRate: 20,
+				width: { ideal: 1920, max: 3840 },
+				height: { ideal: 1080, max: 2160 },
+				frameRate: { ideal: 30, max: 60 },
 			},
 			audio: false,
 		});
@@ -943,6 +1070,20 @@ async function startScreenShare() {
 		if (!videoTrack) {
 			throw new Error("No display track received.");
 		}
+
+		if ("contentHint" in videoTrack) {
+			videoTrack.contentHint = "detail";
+		}
+
+		await videoTrack
+			.applyConstraints({
+				width: { ideal: 1920, max: 3840 },
+				height: { ideal: 1080, max: 2160 },
+				frameRate: { ideal: 30, max: 60 },
+			})
+			.catch(() => {
+				// Some devices cannot satisfy strict display constraints.
+			});
 
 		const selfName =
 			participantState.get(socket.id)?.userName ||
@@ -970,6 +1111,7 @@ async function startScreenShare() {
 		}
 
 		shareBtn.textContent = "Stop Share";
+		shareBtn.setAttribute("aria-pressed", "true");
 		updateParticipantList();
 		socket.emit("screen-share-state-changed", { sharing: true });
 		setStatus("You started sharing your screen.");
@@ -1002,6 +1144,12 @@ randomRoomBtn.addEventListener("click", () => {
 
 serverUrlInput.addEventListener("input", () => {
 	refreshBackendStatus();
+});
+
+backendStatus.addEventListener("click", () => {
+	checkBackendHealth({ showChecking: true }).catch(() => {
+		setBackendStatus("disconnected");
+	});
 });
 
 permanentRoomBtn.addEventListener("click", () => {
@@ -1039,10 +1187,23 @@ leaveBtn.addEventListener("click", () => {
 	leaveRoom();
 });
 
+window.addEventListener("beforeunload", () => {
+	if (backendHealthDebounceTimer) {
+		clearTimeout(backendHealthDebounceTimer);
+	}
+
+	if (backendHealthInterval) {
+		clearInterval(backendHealthInterval);
+	}
+});
+
 roomInput.value = readRoomIdFromUrl() || getOrCreatePermanentRoomId();
 nameInput.value = `Guest-${Math.random().toString(36).slice(2, 5)}`;
+muteBtn.setAttribute("aria-pressed", "false");
+deafenBtn.setAttribute("aria-pressed", "false");
+shareBtn.setAttribute("aria-pressed", "false");
 updateScreensEmptyState();
 updateParticipantList();
 initializeBackendConfig().catch(() => {
-	setBackendStatus("Unable to load backend configuration.", "warn");
+	setBackendStatus("disconnected");
 });
