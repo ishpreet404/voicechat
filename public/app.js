@@ -3,6 +3,8 @@ const roomPanel = document.getElementById("roomPanel");
 const nameInput = document.getElementById("nameInput");
 const roomInput = document.getElementById("roomInput");
 const serverUrlInput = document.getElementById("serverUrlInput");
+const backendHint = document.getElementById("backendHint");
+const backendStatus = document.getElementById("backendStatus");
 const randomRoomBtn = document.getElementById("randomRoomBtn");
 const permanentRoomBtn = document.getElementById("permanentRoomBtn");
 const copyInviteBtn = document.getElementById("copyInviteBtn");
@@ -25,6 +27,8 @@ let localMuted = false;
 let localDeafened = false;
 let mutedBeforeDeafen = false;
 let currentRoomId = "";
+let joinInProgress = false;
+let discoveredServerUrl = "";
 
 const peerConnections = new Map();
 const screenSenders = new Map();
@@ -37,6 +41,20 @@ const rtcConfig = {
 };
 
 const PERMANENT_ROOM_KEY = "permanentRoomId";
+
+function setBackendStatus(message, tone = "") {
+	backendStatus.textContent = message;
+	backendStatus.classList.remove("ok", "warn");
+	if (tone) {
+		backendStatus.classList.add(tone);
+	}
+}
+
+function setJoinInProgress(active) {
+	joinInProgress = active;
+	joinBtn.disabled = active;
+	joinBtn.textContent = active ? "Connecting..." : "Enter Voice Room";
+}
 
 function randomRoom() {
 	return `room-${Math.random().toString(36).slice(2, 8)}`;
@@ -119,6 +137,33 @@ function normalizeServerUrl(value) {
 	} catch {
 		return "";
 	}
+}
+
+async function discoverBackendUrl() {
+	try {
+		const response = await fetch("/api/socket-url", { cache: "no-store" });
+		if (!response.ok) {
+			return "";
+		}
+
+		const payload = await response.json();
+		return normalizeServerUrl(payload.socketServerUrl || "");
+	} catch {
+		return "";
+	}
+}
+
+function resolveSocketServerUrl() {
+	const manual = normalizeServerUrl(serverUrlInput.value);
+	if (manual) {
+		return manual;
+	}
+
+	if (discoveredServerUrl) {
+		return discoveredServerUrl;
+	}
+
+	return "";
 }
 
 function updateParticipantList() {
@@ -252,6 +297,50 @@ function setLocalMuteState(nextMuted, shouldEmit = true) {
 	}
 }
 
+function refreshBackendStatus() {
+	const manual = normalizeServerUrl(serverUrlInput.value);
+	if (manual) {
+		setBackendStatus(`Backend: ${manual}`, "ok");
+		return;
+	}
+
+	if (discoveredServerUrl) {
+		setBackendStatus(`Backend from Vercel env: ${discoveredServerUrl}`, "ok");
+		return;
+	}
+
+	if (
+		window.location.hostname === "localhost" ||
+		window.location.hostname === "127.0.0.1"
+	) {
+		setBackendStatus(`Backend: ${window.location.origin} (same origin)`, "ok");
+		return;
+	}
+
+	setBackendStatus(
+		"Backend not configured. Set Signal Server URL or Vercel env SIGNAL_SERVER_URL.",
+		"warn",
+	);
+}
+
+async function initializeBackendConfig() {
+	const savedServerUrl = normalizeServerUrl(
+		localStorage.getItem("signalServerUrl") || "",
+	);
+	if (savedServerUrl) {
+		serverUrlInput.value = savedServerUrl;
+	}
+
+	if (!savedServerUrl) {
+		discoveredServerUrl = await discoverBackendUrl();
+		if (discoveredServerUrl) {
+			backendHint.textContent = `Auto-loaded from Vercel env: ${discoveredServerUrl}`;
+		}
+	}
+
+	refreshBackendStatus();
+}
+
 function resetConnectionState() {
 	for (const [, pc] of peerConnections) {
 		pc.onicecandidate = null;
@@ -296,6 +385,7 @@ function resetConnectionState() {
 	deafenBtn.textContent = "Deafen";
 	shareBtn.textContent = "Share Screen";
 	currentRoomId = "";
+	setJoinInProgress(false);
 	updateScreensEmptyState();
 	updateParticipantList();
 }
@@ -421,16 +511,24 @@ async function startLocalAudio() {
 }
 
 async function joinRoom() {
+	if (joinInProgress) {
+		return;
+	}
+
 	joinError.textContent = "";
 
 	const userName = sanitizeName(nameInput.value) || "Guest";
 	const roomId = sanitizeRoom(roomInput.value) || "lobby";
-	const configuredServerUrl = normalizeServerUrl(serverUrlInput.value);
+	const manualServerUrl = normalizeServerUrl(serverUrlInput.value);
+	const hasManualServerUrl = Boolean(serverUrlInput.value.trim());
+	const configuredServerUrl = manualServerUrl || discoveredServerUrl;
 
-	if (serverUrlInput.value.trim() && !configuredServerUrl) {
+	if (hasManualServerUrl && !manualServerUrl) {
 		joinError.textContent = "Invalid signal server URL.";
 		return;
 	}
+
+	setJoinInProgress(true);
 
 	try {
 		setStatus("Starting microphone...");
@@ -438,14 +536,26 @@ async function joinRoom() {
 
 		if (configuredServerUrl) {
 			localStorage.setItem("signalServerUrl", configuredServerUrl);
-			socket = io(configuredServerUrl);
+			socket = io(configuredServerUrl, {
+				transports: ["websocket", "polling"],
+				timeout: 10000,
+				reconnectionAttempts: 2,
+			});
 		} else {
 			localStorage.removeItem("signalServerUrl");
-			socket = io();
+			socket = io({
+				transports: ["websocket", "polling"],
+				timeout: 10000,
+				reconnectionAttempts: 2,
+			});
 		}
 
+		let initialConnectDone = false;
+
 		socket.on("connect", () => {
+			initialConnectDone = true;
 			currentRoomId = roomId;
+			participantState.clear();
 			participantState.set(socket.id, {
 				userName,
 				muted: localMuted,
@@ -454,12 +564,46 @@ async function joinRoom() {
 
 			socket.emit("join-room", { roomId, userName });
 			setStatus("Connected. Waiting for others...");
+			setBackendStatus(
+				`Backend connected: ${configuredServerUrl || window.location.origin}`,
+				"ok",
+			);
 			updateParticipantList();
+
+			joinPanel.classList.add("hidden");
+			roomPanel.classList.remove("hidden");
+			activeRoom.textContent = roomId;
+			setJoinInProgress(false);
+		});
+
+		socket.on("connect_error", (error) => {
+			if (initialConnectDone) {
+				setStatus("Connection lost. Trying to reconnect...");
+				setBackendStatus("Backend disconnected. Retrying...", "warn");
+				return;
+			}
+
+			joinError.textContent = `Unable to connect backend: ${error.message}`;
+			setStatus("Cannot reach backend server.");
+			setBackendStatus("Backend unavailable. Check Signal Server URL.", "warn");
+			setJoinInProgress(false);
+			resetConnectionState();
+			joinPanel.classList.remove("hidden");
+			roomPanel.classList.add("hidden");
 		});
 
 		socket.on("room-participants", ({ roomId: joinedRoom, participants }) => {
 			activeRoom.textContent = joinedRoom;
 			updateRoomUrl(joinedRoom);
+
+			const selfParticipant = participantState.get(socket.id) || {
+				userName,
+				muted: localMuted,
+				sharing: Boolean(localScreenStream),
+			};
+			participantState.clear();
+			participantState.set(socket.id, selfParticipant);
+
 			setStatus(
 				localDeafened
 					? "Room connected. You are deafened."
@@ -467,6 +611,10 @@ async function joinRoom() {
 			);
 
 			for (const peer of participants) {
+				if (peer.id === socket.id) {
+					continue;
+				}
+
 				participantState.set(peer.id, {
 					userName: peer.userName,
 					muted: peer.muted,
@@ -477,25 +625,32 @@ async function joinRoom() {
 			updateParticipantList();
 		});
 
-		socket.on("peer-joined", async ({ id, userName: peerName, muted }) => {
-			participantState.set(id, {
-				userName: peerName,
-				muted,
-				sharing: false,
-			});
-			updateParticipantList();
+		socket.on(
+			"peer-joined",
+			async ({ id, userName: peerName, muted, sharing }) => {
+				if (id === socket.id) {
+					return;
+				}
 
-			const pc = createPeerConnection(id, peerName);
-			const offer = await pc.createOffer();
-			await pc.setLocalDescription(offer);
+				participantState.set(id, {
+					userName: peerName,
+					muted,
+					sharing: Boolean(sharing),
+				});
+				updateParticipantList();
 
-			socket.emit("signal-offer", {
-				to: id,
-				offer,
-			});
+				const pc = createPeerConnection(id, peerName);
+				const offer = await pc.createOffer();
+				await pc.setLocalDescription(offer);
 
-			setStatus(`${peerName} joined the room.`);
-		});
+				socket.emit("signal-offer", {
+					to: id,
+					offer,
+				});
+
+				setStatus(`${peerName} joined the room.`);
+			},
+		);
 
 		socket.on("signal-offer", async ({ from, fromName, offer }) => {
 			const pc = createPeerConnection(from, fromName);
@@ -562,15 +717,13 @@ async function joinRoom() {
 		socket.on("disconnect", () => {
 			if (currentRoomId) {
 				setStatus("Disconnected from room.");
+				setBackendStatus("Backend disconnected.", "warn");
 			}
 		});
-
-		joinPanel.classList.add("hidden");
-		roomPanel.classList.remove("hidden");
-		activeRoom.textContent = roomId;
 	} catch (error) {
 		joinError.textContent = `Unable to join: ${error.message}`;
 		setStatus("Microphone access is required.");
+		setJoinInProgress(false);
 		resetConnectionState();
 		joinPanel.classList.remove("hidden");
 		roomPanel.classList.add("hidden");
@@ -710,6 +863,10 @@ randomRoomBtn.addEventListener("click", () => {
 	roomInput.value = randomRoom();
 });
 
+serverUrlInput.addEventListener("input", () => {
+	refreshBackendStatus();
+});
+
 permanentRoomBtn.addEventListener("click", () => {
 	const roomId = getOrCreatePermanentRoomId();
 	roomInput.value = roomId;
@@ -747,6 +904,8 @@ leaveBtn.addEventListener("click", () => {
 
 roomInput.value = readRoomIdFromUrl() || getOrCreatePermanentRoomId();
 nameInput.value = `Guest-${Math.random().toString(36).slice(2, 5)}`;
-serverUrlInput.value = localStorage.getItem("signalServerUrl") || "";
 updateScreensEmptyState();
 updateParticipantList();
+initializeBackendConfig().catch(() => {
+	setBackendStatus("Unable to load backend configuration.", "warn");
+});

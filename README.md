@@ -92,8 +92,15 @@ https://your-render-service.onrender.com
 
 1. Import the same repo in Vercel.
 2. Deploy using default settings (the included `vercel.json` rewrites to `public`).
-3. Open the deployed site.
-4. In the app, paste your Render URL into `Signal Server URL (optional)` and join a room.
+3. In Vercel project settings, add env var:
+
+```text
+SIGNAL_SERVER_URL=https://your-render-service.onrender.com
+```
+
+4. Redeploy (or trigger a new deployment).
+5. Open the deployed site. The app auto-loads backend URL from `/api/socket-url`.
+6. Optional override: paste a different URL into `Signal Server URL (optional)`.
 
 Tip: you can leave the server field blank for local same-origin usage.
 

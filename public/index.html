@@ -62,8 +62,12 @@
 							id="serverUrlInput"
 							placeholder="https://your-render-service.onrender.com"
 						/>
+						<p id="backendHint" class="hint">
+							Leave empty to auto-load from Vercel env (`SIGNAL_SERVER_URL`).
+						</p>
 					</label>
 				</div>
+				<p id="backendStatus" class="hint status-line">Backend: checking...</p>
 				<button id="joinBtn" class="primary" type="button">
 					Enter Voice Room
 				</button>
