@@ -1,69 +1,100 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
-  <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>EchoRoom Voice Chat</title>
-    <link rel="preconnect" href="https://fonts.googleapis.com" />
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link
-      href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:wght@500;700;800&family=IBM+Plex+Mono:wght@400;600&display=swap"
-      rel="stylesheet"
-    />
-    <link rel="stylesheet" href="styles.css" />
-  </head>
-  <body>
-    <div class="ambient-shape shape-a"></div>
-    <div class="ambient-shape shape-b"></div>
+	<head>
+		<meta charset="UTF-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+		<title>EchoRoom Voice Chat</title>
+		<link rel="preconnect" href="https://fonts.googleapis.com" />
+		<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+		<link
+			href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:wght@500;700;800&family=IBM+Plex+Mono:wght@400;600&display=swap"
+			rel="stylesheet"
+		/>
+		<link rel="stylesheet" href="styles.css" />
+	</head>
+	<body>
+		<div class="ambient-shape shape-a"></div>
+		<div class="ambient-shape shape-b"></div>
 
-    <main class="layout">
-      <header class="hero">
-        <p class="eyebrow">GROUP VOICE CHAT</p>
-        <h1>EchoRoom</h1>
-        <p class="subhead">
-          Drop into a room and talk in real-time with your crew. No accounts. No
-          friction.
-        </p>
-      </header>
+		<main class="layout">
+			<header class="hero">
+				<p class="eyebrow">GROUP VOICE CHAT</p>
+				<h1>EchoRoom</h1>
+				<p class="subhead">
+					Drop into a room and talk in real-time with your crew. No accounts. No
+					friction.
+				</p>
+			</header>
 
-      <section class="panel" id="joinPanel">
-        <h2>Join Or Create A Room</h2>
-        <div class="field-grid">
-          <label>
-            Display Name
-            <input id="nameInput" maxlength="32" placeholder="Sky Pilot" />
-          </label>
-          <label>
-            Room ID
-            <div class="row">
-              <input id="roomInput" maxlength="40" placeholder="weekend-hang" />
-              <button id="randomRoomBtn" class="ghost" type="button">Random</button>
-            </div>
-          </label>
-        </div>
-        <button id="joinBtn" class="primary" type="button">Enter Voice Room</button>
-        <p id="joinError" class="error" role="alert"></p>
-      </section>
+			<section class="panel" id="joinPanel">
+				<h2>Join Or Create A Room</h2>
+				<div class="field-grid">
+					<label>
+						Display Name
+						<input id="nameInput" maxlength="32" placeholder="Sky Pilot" />
+					</label>
+					<label>
+						Room ID
+						<div class="row">
+							<input id="roomInput" maxlength="40" placeholder="weekend-hang" />
+							<button id="randomRoomBtn" class="ghost" type="button">
+								Random
+							</button>
+						</div>
+					</label>
+					<label class="full-width">
+						Signal Server URL (optional)
+						<input
+							id="serverUrlInput"
+							placeholder="https://your-render-service.onrender.com"
+						/>
+					</label>
+				</div>
+				<button id="joinBtn" class="primary" type="button">
+					Enter Voice Room
+				</button>
+				<p id="joinError" class="error" role="alert"></p>
+			</section>
 
-      <section class="panel hidden" id="roomPanel">
-        <div class="room-head">
-          <div>
-            <p class="eyebrow">CONNECTED ROOM</p>
-            <h2 id="activeRoom">room-id</h2>
-          </div>
-          <div class="controls">
-            <button id="muteBtn" class="warn" type="button">Mute</button>
-            <button id="leaveBtn" class="ghost" type="button">Leave</button>
-          </div>
-        </div>
+			<section class="panel hidden" id="roomPanel">
+				<div class="room-head">
+					<div>
+						<p class="eyebrow">CONNECTED ROOM</p>
+						<h2 id="activeRoom">room-id</h2>
+					</div>
+					<div class="controls">
+						<button id="muteBtn" class="warn" type="button">Mute</button>
+						<button id="deafenBtn" class="warn-alt" type="button">
+							Deafen
+						</button>
+						<button id="shareBtn" class="primary" type="button">
+							Share Screen
+						</button>
+						<button id="leaveBtn" class="ghost" type="button">Leave</button>
+					</div>
+				</div>
 
-        <p id="statusText" class="status">Starting microphone...</p>
+				<p id="statusText" class="status">Starting microphone...</p>
 
-        <ul id="participants" class="participant-list"></ul>
-      </section>
-    </main>
+				<ul id="participants" class="participant-list"></ul>
 
-    <script src="/socket.io/socket.io.js"></script>
-    <script src="app.js"></script>
-  </body>
+				<section class="screens">
+					<div class="screens-head">
+						<p class="eyebrow">LIVE SCREEN SHARES</p>
+					</div>
+					<div id="screensGrid" class="screens-grid">
+						<p id="screensEmpty" class="screens-empty">
+							No one is sharing a screen.
+						</p>
+					</div>
+				</section>
+			</section>
+		</main>
+
+		<script
+			src="https://cdn.socket.io/4.8.3/socket.io.min.js"
+			crossorigin="anonymous"
+		></script>
+		<script src="app.js"></script>
+	</body>
 </html>

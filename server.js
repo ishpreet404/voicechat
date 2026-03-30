@@ -5,106 +5,191 @@ const { Server } = require("socket.io");
 
 const app = express();
 const server = http.createServer(app);
-const io = new Server(server);
+const allowedOrigins = (process.env.CORS_ORIGIN || "*")
+	.split(",")
+	.map((origin) => origin.trim())
+	.filter(Boolean);
+
+const io = new Server(server, {
+	cors: {
+		origin: allowedOrigins.includes("*") ? true : allowedOrigins,
+		methods: ["GET", "POST"],
+	},
+});
+
+const KEEP_ALIVE_ENABLED =
+	String(process.env.KEEP_ALIVE_ENABLED || "false") === "true";
+const KEEP_ALIVE_INTERVAL_MS = Math.max(
+	30_000,
+	Number(process.env.KEEP_ALIVE_INTERVAL_MS || 14 * 60 * 1000),
+);
+const KEEP_ALIVE_URL = String(process.env.KEEP_ALIVE_URL || "").trim();
 
 const rooms = new Map();
 
 app.use(express.static(path.join(__dirname, "public")));
 
+app.get("/health", (_req, res) => {
+	res.status(200).json({ ok: true });
+});
+
+function startKeepAliveClock(port) {
+	if (!KEEP_ALIVE_ENABLED) {
+		return;
+	}
+
+	const targetUrl = KEEP_ALIVE_URL || `http://127.0.0.1:${port}/health`;
+
+	const tick = async () => {
+		try {
+			const response = await fetch(targetUrl, {
+				method: "GET",
+				cache: "no-store",
+			});
+
+			if (!response.ok) {
+				console.warn(
+					`Keep-alive ping failed with status ${response.status} at ${targetUrl}`,
+				);
+			}
+		} catch (error) {
+			console.warn(`Keep-alive ping error at ${targetUrl}: ${error.message}`);
+		}
+	};
+
+	setInterval(tick, KEEP_ALIVE_INTERVAL_MS);
+	console.log(
+		`Keep-alive clock enabled. Pinging ${targetUrl} every ${Math.round(
+			KEEP_ALIVE_INTERVAL_MS / 1000,
+		)} seconds.`,
+	);
+}
+
 io.on("connection", (socket) => {
-  socket.on("join-room", ({ roomId, userName }) => {
-    const safeRoomId = String(roomId || "lobby").trim().slice(0, 40) || "lobby";
-    const safeUserName = String(userName || "Guest").trim().slice(0, 32) || "Guest";
+	socket.on("join-room", ({ roomId, userName }) => {
+		const safeRoomId =
+			String(roomId || "lobby")
+				.trim()
+				.slice(0, 40) || "lobby";
+		const safeUserName =
+			String(userName || "Guest")
+				.trim()
+				.slice(0, 32) || "Guest";
 
-    socket.data.roomId = safeRoomId;
-    socket.data.userName = safeUserName;
+		socket.data.roomId = safeRoomId;
+		socket.data.userName = safeUserName;
 
-    if (!rooms.has(safeRoomId)) {
-      rooms.set(safeRoomId, new Map());
-    }
+		if (!rooms.has(safeRoomId)) {
+			rooms.set(safeRoomId, new Map());
+		}
 
-    const room = rooms.get(safeRoomId);
-    const participants = [...room.entries()].map(([id, user]) => ({
-      id,
-      userName: user.userName,
-      muted: user.muted,
-    }));
+		const room = rooms.get(safeRoomId);
+		const participants = [...room.entries()].map(([id, user]) => ({
+			id,
+			userName: user.userName,
+			muted: user.muted,
+			sharing: user.sharing,
+		}));
 
-    room.set(socket.id, { userName: safeUserName, muted: false });
-    socket.join(safeRoomId);
+		room.set(socket.id, {
+			userName: safeUserName,
+			muted: false,
+			sharing: false,
+		});
+		socket.join(safeRoomId);
 
-    socket.emit("room-participants", {
-      roomId: safeRoomId,
-      participants,
-    });
+		socket.emit("room-participants", {
+			roomId: safeRoomId,
+			participants,
+		});
 
-    socket.to(safeRoomId).emit("peer-joined", {
-      id: socket.id,
-      userName: safeUserName,
-      muted: false,
-    });
-  });
+		socket.to(safeRoomId).emit("peer-joined", {
+			id: socket.id,
+			userName: safeUserName,
+			muted: false,
+			sharing: false,
+		});
+	});
 
-  socket.on("signal-offer", ({ to, offer }) => {
-    io.to(to).emit("signal-offer", {
-      from: socket.id,
-      fromName: socket.data.userName,
-      offer,
-    });
-  });
+	socket.on("signal-offer", ({ to, offer }) => {
+		io.to(to).emit("signal-offer", {
+			from: socket.id,
+			fromName: socket.data.userName,
+			offer,
+		});
+	});
 
-  socket.on("signal-answer", ({ to, answer }) => {
-    io.to(to).emit("signal-answer", {
-      from: socket.id,
-      answer,
-    });
-  });
+	socket.on("signal-answer", ({ to, answer }) => {
+		io.to(to).emit("signal-answer", {
+			from: socket.id,
+			answer,
+		});
+	});
 
-  socket.on("signal-ice-candidate", ({ to, candidate }) => {
-    io.to(to).emit("signal-ice-candidate", {
-      from: socket.id,
-      candidate,
-    });
-  });
+	socket.on("signal-ice-candidate", ({ to, candidate }) => {
+		io.to(to).emit("signal-ice-candidate", {
+			from: socket.id,
+			candidate,
+		});
+	});
 
-  socket.on("mute-state-changed", ({ muted }) => {
-    const roomId = socket.data.roomId;
-    if (!roomId || !rooms.has(roomId)) {
-      return;
-    }
+	socket.on("mute-state-changed", ({ muted }) => {
+		const roomId = socket.data.roomId;
+		if (!roomId || !rooms.has(roomId)) {
+			return;
+		}
 
-    const room = rooms.get(roomId);
-    const participant = room.get(socket.id);
-    if (participant) {
-      participant.muted = Boolean(muted);
-    }
+		const room = rooms.get(roomId);
+		const participant = room.get(socket.id);
+		if (participant) {
+			participant.muted = Boolean(muted);
+		}
 
-    socket.to(roomId).emit("peer-mute-state", {
-      id: socket.id,
-      muted: Boolean(muted),
-    });
-  });
+		socket.to(roomId).emit("peer-mute-state", {
+			id: socket.id,
+			muted: Boolean(muted),
+		});
+	});
 
-  socket.on("disconnect", () => {
-    const roomId = socket.data.roomId;
-    if (!roomId || !rooms.has(roomId)) {
-      return;
-    }
+	socket.on("screen-share-state-changed", ({ sharing }) => {
+		const roomId = socket.data.roomId;
+		if (!roomId || !rooms.has(roomId)) {
+			return;
+		}
 
-    const room = rooms.get(roomId);
-    room.delete(socket.id);
+		const room = rooms.get(roomId);
+		const participant = room.get(socket.id);
+		if (participant) {
+			participant.sharing = Boolean(sharing);
+		}
 
-    socket.to(roomId).emit("peer-left", {
-      id: socket.id,
-    });
+		socket.to(roomId).emit("peer-screen-share-state", {
+			id: socket.id,
+			sharing: Boolean(sharing),
+		});
+	});
 
-    if (room.size === 0) {
-      rooms.delete(roomId);
-    }
-  });
+	socket.on("disconnect", () => {
+		const roomId = socket.data.roomId;
+		if (!roomId || !rooms.has(roomId)) {
+			return;
+		}
+
+		const room = rooms.get(roomId);
+		room.delete(socket.id);
+
+		socket.to(roomId).emit("peer-left", {
+			id: socket.id,
+		});
+
+		if (room.size === 0) {
+			rooms.delete(roomId);
+		}
+	});
 });
 
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
-  console.log(`Voice chat app is running on http://localhost:${PORT}`);
+	console.log(`Voice chat app is running on http://localhost:${PORT}`);
+	startKeepAliveClock(PORT);
 });

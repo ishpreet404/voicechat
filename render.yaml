@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: echoroom-signal
+    env: node
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_VERSION
+        value: 20
+      - key: CORS_ORIGIN
+        value: https://your-vercel-project.vercel.app
+      - key: KEEP_ALIVE_ENABLED
+        value: "true"
+      - key: KEEP_ALIVE_INTERVAL_MS
+        value: "840000"
+      - key: KEEP_ALIVE_URL
+        value: https://your-render-service.onrender.com/health
