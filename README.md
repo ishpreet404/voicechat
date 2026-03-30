@@ -20,13 +20,19 @@ A simple group voice chat website built with WebRTC + Socket.IO signaling.
 npm install
 ```
 
-2. Start the server:
+2. Create local env file from `.env.example` (optional but recommended):
+
+```bash
+copy .env.example .env
+```
+
+3. Start the server:
 
 ```bash
 npm start
 ```
 
-3. Open in your browser:
+4. Open in your browser:
 
 - `http://localhost:3000`
 

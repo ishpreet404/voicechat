@@ -138,6 +138,22 @@ input::placeholder {
   gap: 0.55rem;
 }
 
+.room-id-stack {
+  display: grid;
+  gap: 0.5rem;
+}
+
+.quick-actions {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.quick-actions .ghost {
+  padding: 0.48rem 0.7rem;
+  font-size: 0.78rem;
+}
+
 .full-width {
   grid-column: 1 / -1;
 }

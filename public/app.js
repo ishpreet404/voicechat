@@ -4,6 +4,8 @@ const nameInput = document.getElementById("nameInput");
 const roomInput = document.getElementById("roomInput");
 const serverUrlInput = document.getElementById("serverUrlInput");
 const randomRoomBtn = document.getElementById("randomRoomBtn");
+const permanentRoomBtn = document.getElementById("permanentRoomBtn");
+const copyInviteBtn = document.getElementById("copyInviteBtn");
 const joinBtn = document.getElementById("joinBtn");
 const joinError = document.getElementById("joinError");
 const activeRoom = document.getElementById("activeRoom");
@@ -34,8 +36,53 @@ const rtcConfig = {
 	iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
 };
 
+const PERMANENT_ROOM_KEY = "permanentRoomId";
+
 function randomRoom() {
 	return `room-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function getOrCreatePermanentRoomId() {
+	const stored = sanitizeRoom(localStorage.getItem(PERMANENT_ROOM_KEY) || "");
+	if (stored) {
+		return stored;
+	}
+
+	const created = `home-${Math.random().toString(36).slice(2, 10)}`;
+	localStorage.setItem(PERMANENT_ROOM_KEY, created);
+	return created;
+}
+
+function updateRoomUrl(roomId) {
+	const cleanRoomId = sanitizeRoom(roomId);
+	if (!cleanRoomId) {
+		return;
+	}
+
+	const url = new URL(window.location.href);
+	url.searchParams.set("room", cleanRoomId);
+	history.replaceState({}, "", url.toString());
+}
+
+function readRoomIdFromUrl() {
+	const url = new URL(window.location.href);
+	return sanitizeRoom(url.searchParams.get("room") || "");
+}
+
+async function copyInviteLink() {
+	const roomId = sanitizeRoom(roomInput.value) || getOrCreatePermanentRoomId();
+	roomInput.value = roomId;
+	updateRoomUrl(roomId);
+
+	const inviteUrl = new URL(window.location.href);
+	inviteUrl.searchParams.set("room", roomId);
+
+	try {
+		await navigator.clipboard.writeText(inviteUrl.toString());
+		setStatus(`Invite link copied for room ${roomId}.`);
+	} catch {
+		setStatus("Could not copy link automatically. Copy it from your browser address bar.");
+	}
 }
 
 function sanitizeName(value) {
@@ -410,6 +457,7 @@ async function joinRoom() {
 
 		socket.on("room-participants", ({ roomId: joinedRoom, participants }) => {
 			activeRoom.textContent = joinedRoom;
+			updateRoomUrl(joinedRoom);
 			setStatus(
 				localDeafened
 					? "Room connected. You are deafened."
@@ -660,6 +708,19 @@ randomRoomBtn.addEventListener("click", () => {
 	roomInput.value = randomRoom();
 });
 
+permanentRoomBtn.addEventListener("click", () => {
+	const roomId = getOrCreatePermanentRoomId();
+	roomInput.value = roomId;
+	updateRoomUrl(roomId);
+	setStatus(`Using your constant room ID: ${roomId}`);
+});
+
+copyInviteBtn.addEventListener("click", () => {
+	copyInviteLink().catch((error) => {
+		setStatus(`Unable to copy invite: ${error.message}`);
+	});
+});
+
 joinBtn.addEventListener("click", () => {
 	joinRoom();
 });
@@ -682,7 +743,7 @@ leaveBtn.addEventListener("click", () => {
 	leaveRoom();
 });
 
-roomInput.value = randomRoom();
+roomInput.value = readRoomIdFromUrl() || getOrCreatePermanentRoomId();
 nameInput.value = `Guest-${Math.random().toString(36).slice(2, 5)}`;
 serverUrlInput.value = localStorage.getItem("signalServerUrl") || "";
 updateScreensEmptyState();
