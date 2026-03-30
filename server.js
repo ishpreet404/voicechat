@@ -24,6 +24,12 @@ const KEEP_ALIVE_INTERVAL_MS = Math.max(
 	Number(process.env.KEEP_ALIVE_INTERVAL_MS || 14 * 60 * 1000),
 );
 const KEEP_ALIVE_URL = String(process.env.KEEP_ALIVE_URL || "").trim();
+const TURN_URLS = (process.env.TURN_URLS || "")
+	.split(",")
+	.map((url) => url.trim())
+	.filter(Boolean);
+const TURN_USERNAME = String(process.env.TURN_USERNAME || "").trim();
+const TURN_CREDENTIAL = String(process.env.TURN_CREDENTIAL || "").trim();
 
 const rooms = new Map();
 
@@ -31,6 +37,20 @@ app.use(express.static(path.join(__dirname, "public")));
 
 app.get("/health", (_req, res) => {
 	res.status(200).json({ ok: true });
+});
+
+app.get("/rtc-config", (_req, res) => {
+	const iceServers = [{ urls: "stun:stun.l.google.com:19302" }];
+
+	if (TURN_URLS.length && TURN_USERNAME && TURN_CREDENTIAL) {
+		iceServers.push({
+			urls: TURN_URLS,
+			username: TURN_USERNAME,
+			credential: TURN_CREDENTIAL,
+		});
+	}
+
+	res.status(200).json({ iceServers });
 });
 
 function startKeepAliveClock(port) {

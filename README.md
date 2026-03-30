@@ -108,3 +108,26 @@ Tip: you can leave the server field blank for local same-origin usage.
 
 - This app uses a mesh WebRTC topology, which is good for small groups.
 - For large rooms, use an SFU media server architecture for better performance.
+
+## Troubleshooting Media (No Voice Or Screen)
+
+1. Confirm backend is reachable from frontend:
+
+- The join page should show `Backend connected: ...`.
+- If not, set `SIGNAL_SERVER_URL` in Vercel and redeploy.
+
+2. Ensure Render CORS allows your Vercel domain:
+
+```text
+CORS_ORIGIN=https://your-project.vercel.app
+```
+
+3. If signaling works but media still fails, configure TURN relay env vars on Render:
+
+```text
+TURN_URLS=turn:your-turn-host:3478,turn:your-turn-host:443?transport=tcp
+TURN_USERNAME=your-username
+TURN_CREDENTIAL=your-password
+```
+
+Without TURN, many mobile/corporate networks block direct WebRTC media.

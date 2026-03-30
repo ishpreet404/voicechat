@@ -35,12 +35,21 @@ const screenSenders = new Map();
 const remoteAudioElements = new Map();
 const remoteScreenCards = new Map();
 const participantState = new Map();
+const peerDisconnectTimers = new Map();
+let localScreenCard;
 
-const rtcConfig = {
+let rtcConfig = {
 	iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
 };
 
 const PERMANENT_ROOM_KEY = "permanentRoomId";
+
+function isLocalhost() {
+	return (
+		window.location.hostname === "localhost" ||
+		window.location.hostname === "127.0.0.1"
+	);
+}
 
 function setBackendStatus(message, tone = "") {
 	backendStatus.textContent = message;
@@ -153,6 +162,27 @@ async function discoverBackendUrl() {
 	}
 }
 
+async function loadRtcConfig(socketServerUrl) {
+	const baseUrl = socketServerUrl || window.location.origin;
+	try {
+		const response = await fetch(`${baseUrl}/rtc-config`, {
+			cache: "no-store",
+		});
+		if (!response.ok) {
+			return;
+		}
+
+		const payload = await response.json();
+		if (payload?.iceServers?.length) {
+			rtcConfig = {
+				iceServers: payload.iceServers,
+			};
+		}
+	} catch {
+		// Keep default public STUN if dynamic config fails.
+	}
+}
+
 function resolveSocketServerUrl() {
 	const manual = normalizeServerUrl(serverUrlInput.value);
 	if (manual) {
@@ -212,7 +242,42 @@ function setStatus(message) {
 }
 
 function updateScreensEmptyState() {
-	screensEmpty.style.display = remoteScreenCards.size === 0 ? "block" : "none";
+	const hasAnyScreen = remoteScreenCards.size > 0 || Boolean(localScreenCard);
+	screensEmpty.style.display = hasAnyScreen ? "none" : "block";
+}
+
+function removeLocalScreenPreview() {
+	if (!localScreenCard) {
+		return;
+	}
+
+	localScreenCard.remove();
+	localScreenCard = undefined;
+	updateScreensEmptyState();
+}
+
+function ensureLocalScreenPreview(displayName) {
+	if (localScreenCard) {
+		return localScreenCard;
+	}
+
+	const figure = document.createElement("figure");
+	figure.className = "screen-card self-share";
+
+	const video = document.createElement("video");
+	video.autoplay = true;
+	video.playsInline = true;
+	video.muted = true;
+
+	const caption = document.createElement("figcaption");
+	caption.textContent = `${displayName || "You"} - Your Screen`;
+
+	figure.appendChild(video);
+	figure.appendChild(caption);
+	screensGrid.appendChild(figure);
+	localScreenCard = figure;
+	updateScreensEmptyState();
+	return figure;
 }
 
 function removeRemoteScreen(peerId) {
@@ -309,10 +374,7 @@ function refreshBackendStatus() {
 		return;
 	}
 
-	if (
-		window.location.hostname === "localhost" ||
-		window.location.hostname === "127.0.0.1"
-	) {
+	if (isLocalhost()) {
 		setBackendStatus(`Backend: ${window.location.origin} (same origin)`, "ok");
 		return;
 	}
@@ -361,6 +423,7 @@ function resetConnectionState() {
 		card.remove();
 	}
 	remoteScreenCards.clear();
+	removeLocalScreenPreview();
 	participantState.clear();
 	localMuted = false;
 	localDeafened = false;
@@ -405,6 +468,11 @@ function ensureAudioElement(peerId) {
 }
 
 function removePeer(peerId) {
+	if (peerDisconnectTimers.has(peerId)) {
+		clearTimeout(peerDisconnectTimers.get(peerId));
+		peerDisconnectTimers.delete(peerId);
+	}
+
 	if (peerConnections.has(peerId)) {
 		const pc = peerConnections.get(peerId);
 		pc.close();
@@ -462,16 +530,23 @@ function createPeerConnection(peerId, peerName) {
 	pc.ontrack = (event) => {
 		const participantName =
 			participantState.get(peerId)?.userName || peerName || "Guest";
+		const stream =
+			event.streams && event.streams[0]
+				? event.streams[0]
+				: new MediaStream([event.track]);
 		if (event.track.kind === "audio") {
 			const audio = ensureAudioElement(peerId);
-			audio.srcObject = event.streams[0];
+			audio.srcObject = stream;
+			audio.play().catch(() => {
+				// Browser autoplay policies can block this until user gesture.
+			});
 			return;
 		}
 
 		if (event.track.kind === "video") {
 			const card = ensureRemoteScreenCard(peerId, participantName);
 			const video = card.querySelector("video");
-			video.srcObject = event.streams[0];
+			video.srcObject = stream;
 			video.muted = localDeafened;
 			event.track.onended = () => {
 				removeRemoteScreen(peerId);
@@ -479,8 +554,43 @@ function createPeerConnection(peerId, peerName) {
 		}
 	};
 
+	pc.oniceconnectionstatechange = () => {
+		if (pc.iceConnectionState === "failed") {
+			setStatus(
+				"P2P media connection failed. Add TURN server credentials if users are on restricted networks.",
+			);
+		}
+	};
+
 	pc.onconnectionstatechange = () => {
-		if (["failed", "disconnected", "closed"].includes(pc.connectionState)) {
+		if (pc.connectionState === "disconnected") {
+			if (!peerDisconnectTimers.has(peerId)) {
+				const timer = setTimeout(() => {
+					const currentPc = peerConnections.get(peerId);
+					if (!currentPc) {
+						return;
+					}
+
+					if (
+						currentPc.connectionState === "disconnected" ||
+						currentPc.connectionState === "failed" ||
+						currentPc.connectionState === "closed"
+					) {
+						removePeer(peerId);
+					}
+				}, 12000);
+
+				peerDisconnectTimers.set(peerId, timer);
+			}
+			return;
+		}
+
+		if (peerDisconnectTimers.has(peerId)) {
+			clearTimeout(peerDisconnectTimers.get(peerId));
+			peerDisconnectTimers.delete(peerId);
+		}
+
+		if (["failed", "closed"].includes(pc.connectionState)) {
 			removePeer(peerId);
 		}
 	};
@@ -508,6 +618,10 @@ async function startLocalAudio() {
 		},
 		video: false,
 	});
+
+	if (!localStream.getAudioTracks().length) {
+		throw new Error("Microphone track not available.");
+	}
 }
 
 async function joinRoom() {
@@ -521,10 +635,17 @@ async function joinRoom() {
 	const roomId = sanitizeRoom(roomInput.value) || "lobby";
 	const manualServerUrl = normalizeServerUrl(serverUrlInput.value);
 	const hasManualServerUrl = Boolean(serverUrlInput.value.trim());
-	const configuredServerUrl = manualServerUrl || discoveredServerUrl;
+	const configuredServerUrl = resolveSocketServerUrl();
 
 	if (hasManualServerUrl && !manualServerUrl) {
 		joinError.textContent = "Invalid signal server URL.";
+		return;
+	}
+
+	if (!configuredServerUrl && !isLocalhost()) {
+		joinError.textContent =
+			"Backend is not configured. Set SIGNAL_SERVER_URL in Vercel or enter Signal Server URL.";
+		setBackendStatus("Backend missing. Add Render URL before joining.", "warn");
 		return;
 	}
 
@@ -533,20 +654,27 @@ async function joinRoom() {
 	try {
 		setStatus("Starting microphone...");
 		await startLocalAudio();
+		await loadRtcConfig(configuredServerUrl);
 
 		if (configuredServerUrl) {
 			localStorage.setItem("signalServerUrl", configuredServerUrl);
 			socket = io(configuredServerUrl, {
 				transports: ["websocket", "polling"],
-				timeout: 10000,
-				reconnectionAttempts: 2,
+				timeout: 20000,
+				reconnection: true,
+				reconnectionAttempts: 25,
+				reconnectionDelay: 1000,
+				reconnectionDelayMax: 5000,
 			});
 		} else {
 			localStorage.removeItem("signalServerUrl");
 			socket = io({
 				transports: ["websocket", "polling"],
-				timeout: 10000,
-				reconnectionAttempts: 2,
+				timeout: 20000,
+				reconnection: true,
+				reconnectionAttempts: 25,
+				reconnectionDelay: 1000,
+				reconnectionDelayMax: 5000,
 			});
 		}
 
@@ -784,6 +912,7 @@ async function stopScreenShare(emitState = true) {
 
 	localScreenStream.getTracks().forEach((track) => track.stop());
 	localScreenStream = undefined;
+	removeLocalScreenPreview();
 	shareBtn.textContent = "Share Screen";
 
 	const self = participantState.get(socket.id);
@@ -814,6 +943,14 @@ async function startScreenShare() {
 		if (!videoTrack) {
 			throw new Error("No display track received.");
 		}
+
+		const selfName =
+			participantState.get(socket.id)?.userName ||
+			sanitizeName(nameInput.value) ||
+			"You";
+		const localCard = ensureLocalScreenPreview(selfName);
+		const localVideo = localCard.querySelector("video");
+		localVideo.srcObject = localScreenStream;
 
 		videoTrack.onended = () => {
 			stopScreenShare(true).catch((error) => {

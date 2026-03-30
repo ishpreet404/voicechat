@@ -359,6 +359,11 @@ button:active {
   background: rgba(28, 33, 47, 0.92);
 }
 
+.screen-card.self-share {
+  border-color: rgba(88, 101, 242, 0.65);
+  box-shadow: 0 0 0 1px rgba(88, 101, 242, 0.22) inset;
+}
+
 .screen-card video {
   width: 100%;
   aspect-ratio: 16 / 9;
