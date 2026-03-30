@@ -81,7 +81,9 @@ async function copyInviteLink() {
 		await navigator.clipboard.writeText(inviteUrl.toString());
 		setStatus(`Invite link copied for room ${roomId}.`);
 	} catch {
-		setStatus("Could not copy link automatically. Copy it from your browser address bar.");
+		setStatus(
+			"Could not copy link automatically. Copy it from your browser address bar.",
+		);
 	}
 }
 
