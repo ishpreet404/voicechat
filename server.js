@@ -10,9 +10,84 @@ const allowedOrigins = (process.env.CORS_ORIGIN || "*")
 	.map((origin) => origin.trim())
 	.filter(Boolean);
 
+const originMatchers = allowedOrigins.map((origin) => {
+	const normalized = normalizeOrigin(origin);
+
+	if (normalized === "*") {
+		return { type: "all" };
+	}
+
+	if (normalized.includes("*")) {
+		const escaped = normalized
+			.replace(/[.+?^${}()|[\]\\]/g, "\\$&")
+			.replace(/\*/g, ".*");
+		return {
+			type: "pattern",
+			regex: new RegExp(`^${escaped}$`),
+		};
+	}
+
+	return {
+		type: "exact",
+		value: normalized,
+	};
+});
+
+function normalizeOrigin(value) {
+	const raw = String(value || "").trim();
+	if (!raw || raw === "*") {
+		return raw;
+	}
+
+	try {
+		return new URL(raw).origin.toLowerCase();
+	} catch {
+		return raw.replace(/\/+$/, "").toLowerCase();
+	}
+}
+
+function isAllowedOrigin(origin) {
+	if (!origin) {
+		return true;
+	}
+
+	const normalizedOrigin = normalizeOrigin(origin);
+
+	return originMatchers.some((matcher) => {
+		if (matcher.type === "all") {
+			return true;
+		}
+
+		if (matcher.type === "exact") {
+			return matcher.value === normalizedOrigin;
+		}
+
+		return matcher.regex.test(normalizedOrigin);
+	});
+}
+
+function getCorsOriginHeader(origin) {
+	if (!origin || !isAllowedOrigin(origin)) {
+		return "";
+	}
+
+	if (originMatchers.some((matcher) => matcher.type === "all")) {
+		return "*";
+	}
+
+	return origin;
+}
+
 const io = new Server(server, {
 	cors: {
-		origin: allowedOrigins.includes("*") ? true : allowedOrigins,
+		origin: (origin, callback) => {
+			if (isAllowedOrigin(origin)) {
+				callback(null, true);
+				return;
+			}
+
+			callback(new Error("CORS origin is not allowed"), false);
+		},
 		methods: ["GET", "POST"],
 	},
 });
@@ -98,6 +173,31 @@ function isValidSignalTarget(roomId, targetSocketId) {
 
 	return rooms.get(roomId).has(targetSocketId);
 }
+
+app.use((req, res, next) => {
+	const requestOrigin = req.headers.origin;
+	const corsOriginHeader = getCorsOriginHeader(requestOrigin);
+
+	if (corsOriginHeader) {
+		res.setHeader("Access-Control-Allow-Origin", corsOriginHeader);
+		if (corsOriginHeader !== "*") {
+			res.setHeader("Vary", "Origin");
+		}
+	}
+
+	res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
+	res.setHeader(
+		"Access-Control-Allow-Headers",
+		"Content-Type, Authorization",
+	);
+
+	if (req.method === "OPTIONS") {
+		res.status(204).end();
+		return;
+	}
+
+	next();
+});
 
 app.use(express.static(path.join(__dirname, "public")));
 

@@ -43,19 +43,26 @@ const remoteAudioElements = new Map();
 const remoteScreenCards = new Map();
 const participantState = new Map();
 const peerDisconnectTimers = new Map();
+const peerIceRecoveryTimers = new Map();
 const pendingIceCandidates = new Map();
 const blockedAudioPeers = new Set();
+const peerIceRestartAttempts = new Map();
 let audioUnlockHandlersBound = false;
 let localScreenCard;
 
 let rtcConfig = {
 	iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
+	iceCandidatePoolSize: 8,
 };
+
+let hasRelayIceServer = false;
 
 const PERMANENT_ROOM_KEY = "permanentRoomId";
 const BACKEND_HEALTH_CHECK_INTERVAL_MS = 30_000;
 const BACKEND_HEALTH_CHECK_TIMEOUT_MS = 4_500;
 const SCREEN_SHARE_MAX_BITRATE = 8_000_000;
+const MAX_ICE_RESTART_ATTEMPTS = 2;
+const ICE_RECOVERY_RETRY_DELAY_MS = 1200;
 
 function setBackendStatus(state = "checking") {
 	const safeState = ["connected", "disconnected", "checking"].includes(state)
@@ -71,8 +78,14 @@ function setBackendStatus(state = "checking") {
 	backendStatus.classList.remove("connected", "disconnected", "checking");
 	backendStatus.classList.add(safeState);
 	backendStatus.title = "Click to recheck backend status.";
-	backendStatus.setAttribute("aria-label", `Backend status ${labelByState[safeState]}`);
-	backendStatus.setAttribute("aria-busy", safeState === "checking" ? "true" : "false");
+	backendStatus.setAttribute(
+		"aria-label",
+		`Backend status ${labelByState[safeState]}`,
+	);
+	backendStatus.setAttribute(
+		"aria-busy",
+		safeState === "checking" ? "true" : "false",
+	);
 }
 
 function setJoinInProgress(active) {
@@ -143,6 +156,39 @@ function sanitizeChatMessage(value) {
 		.replace(/\s+/g, " ")
 		.trim()
 		.slice(0, 300);
+}
+
+function getIceServerUrls(iceServers) {
+	const urls = [];
+
+	for (const server of iceServers || []) {
+		if (!server?.urls) {
+			continue;
+		}
+
+		if (Array.isArray(server.urls)) {
+			urls.push(...server.urls);
+		} else {
+			urls.push(server.urls);
+		}
+	}
+
+	return urls.map((url) => String(url || "").trim().toLowerCase());
+}
+
+function detectRelayIceServer(iceServers) {
+	return getIceServerUrls(iceServers).some(
+		(url) => url.startsWith("turn:") || url.startsWith("turns:"),
+	);
+}
+
+function clearPeerIceRecoveryTimer(peerId) {
+	if (!peerIceRecoveryTimers.has(peerId)) {
+		return;
+	}
+
+	clearTimeout(peerIceRecoveryTimers.get(peerId));
+	peerIceRecoveryTimers.delete(peerId);
 }
 
 function formatChatTime(timestamp) {
@@ -242,7 +288,9 @@ function hostLooksLikeIpv4Address(host) {
 }
 
 function shouldDefaultToHttp(rawHostValue) {
-	const hostValue = String(rawHostValue || "").trim().toLowerCase();
+	const hostValue = String(rawHostValue || "")
+		.trim()
+		.toLowerCase();
 	const host = hostValue.split("/")[0].split(":")[0];
 
 	if (!host) {
@@ -310,11 +358,16 @@ async function loadRtcConfig(socketServerUrl) {
 		const payload = await response.json();
 		if (payload?.iceServers?.length) {
 			rtcConfig = {
+				...rtcConfig,
 				iceServers: payload.iceServers,
 			};
 		}
 	} catch {
-		// Keep default public STUN if dynamic config fails.
+		setStatus(
+			"Using fallback ICE config. If voice fails, verify CORS_ORIGIN and TURN settings.",
+		);
+	} finally {
+		hasRelayIceServer = detectRelayIceServer(rtcConfig.iceServers);
 	}
 }
 
@@ -396,6 +449,42 @@ function startBackendHealthMonitor() {
 			setBackendStatus("disconnected");
 		});
 	}, BACKEND_HEALTH_CHECK_INTERVAL_MS);
+}
+
+async function attemptIceRestart(peerId, pc, reason) {
+	if (!socket || !pc || pc.signalingState === "closed") {
+		return;
+	}
+
+	const attempts = peerIceRestartAttempts.get(peerId) || 0;
+	if (attempts >= MAX_ICE_RESTART_ATTEMPTS) {
+		if (!hasRelayIceServer) {
+			setStatus(
+				"P2P media connection failed. Configure TURN relay (TURN_URLS, TURN_USERNAME, TURN_CREDENTIAL).",
+			);
+		} else {
+			setStatus(
+				"P2P media connection failed after retries. Ask the peer to reconnect.",
+			);
+		}
+		return;
+	}
+
+	peerIceRestartAttempts.set(peerId, attempts + 1);
+	setStatus(
+		`Network recovery in progress (${attempts + 1}/${MAX_ICE_RESTART_ATTEMPTS})...`,
+	);
+
+	try {
+		const offer = await pc.createOffer({ iceRestart: true });
+		await pc.setLocalDescription(offer);
+		socket.emit("signal-offer", {
+			to: peerId,
+			offer,
+		});
+	} catch (error) {
+		console.warn(`ICE restart failed (${reason}) for peer ${peerId}:`, error);
+	}
 }
 
 function queuePendingIceCandidate(peerId, candidate) {
@@ -725,8 +814,18 @@ async function initializeBackendConfig() {
 }
 
 function resetConnectionState() {
+	for (const [, timer] of peerDisconnectTimers) {
+		clearTimeout(timer);
+	}
+
+	for (const [, timer] of peerIceRecoveryTimers) {
+		clearTimeout(timer);
+	}
+
 	for (const [, pc] of peerConnections) {
 		pc.onicecandidate = null;
+		pc.onicecandidateerror = null;
+		pc.oniceconnectionstatechange = null;
 		pc.ontrack = null;
 		pc.onconnectionstatechange = null;
 		pc.close();
@@ -740,8 +839,11 @@ function resetConnectionState() {
 	peerConnections.clear();
 	screenSenders.clear();
 	remoteAudioElements.clear();
+	peerDisconnectTimers.clear();
+	peerIceRecoveryTimers.clear();
 	pendingIceCandidates.clear();
 	blockedAudioPeers.clear();
+	peerIceRestartAttempts.clear();
 	detachAudioUnlockHandlers();
 	for (const [, card] of remoteScreenCards) {
 		card.remove();
@@ -804,6 +906,8 @@ function removePeer(peerId) {
 		peerDisconnectTimers.delete(peerId);
 	}
 
+	clearPeerIceRecoveryTimer(peerId);
+
 	if (peerConnections.has(peerId)) {
 		const pc = peerConnections.get(peerId);
 		pc.close();
@@ -819,6 +923,7 @@ function removePeer(peerId) {
 
 	pendingIceCandidates.delete(peerId);
 	blockedAudioPeers.delete(peerId);
+	peerIceRestartAttempts.delete(peerId);
 	if (blockedAudioPeers.size === 0) {
 		detachAudioUnlockHandlers();
 	}
@@ -907,11 +1012,54 @@ function createPeerConnection(peerId, peerName) {
 		}
 	};
 
+	pc.onicecandidateerror = (event) => {
+		console.warn("ICE candidate gathering error:", {
+			peerId,
+			errorCode: event?.errorCode,
+			errorText: event?.errorText,
+			url: event?.url,
+		});
+	};
+
 	pc.oniceconnectionstatechange = () => {
-		if (pc.iceConnectionState === "failed") {
-			setStatus(
-				"P2P media connection failed. Add TURN server credentials if users are on restricted networks.",
-			);
+		const iceState = pc.iceConnectionState;
+
+		if (["connected", "completed"].includes(iceState)) {
+			clearPeerIceRecoveryTimer(peerId);
+			peerIceRestartAttempts.delete(peerId);
+			return;
+		}
+
+		if (iceState === "failed") {
+			clearPeerIceRecoveryTimer(peerId);
+			attemptIceRestart(peerId, pc, "failed").catch(() => {
+				// Recovery errors are handled in attemptIceRestart.
+			});
+			return;
+		}
+
+		if (iceState === "disconnected") {
+			if (peerIceRecoveryTimers.has(peerId)) {
+				return;
+			}
+
+			const timer = setTimeout(() => {
+				peerIceRecoveryTimers.delete(peerId);
+				const currentPc = peerConnections.get(peerId);
+				if (!currentPc || currentPc.signalingState === "closed") {
+					return;
+				}
+
+				if (
+					["disconnected", "failed"].includes(currentPc.iceConnectionState)
+				) {
+					attemptIceRestart(peerId, currentPc, "disconnected").catch(() => {
+						// Recovery errors are handled in attemptIceRestart.
+					});
+				}
+			}, ICE_RECOVERY_RETRY_DELAY_MS);
+
+			peerIceRecoveryTimers.set(peerId, timer);
 		}
 	};
 
@@ -938,12 +1086,37 @@ function createPeerConnection(peerId, peerName) {
 			return;
 		}
 
+		if (pc.connectionState === "failed") {
+			attemptIceRestart(peerId, pc, "connection-failed").catch(() => {
+				// Recovery errors are handled in attemptIceRestart.
+			});
+
+			if (!peerDisconnectTimers.has(peerId)) {
+				const timer = setTimeout(() => {
+					const currentPc = peerConnections.get(peerId);
+					if (!currentPc) {
+						return;
+					}
+
+					if (currentPc.connectionState === "failed") {
+						removePeer(peerId);
+					}
+				}, 15000);
+
+				peerDisconnectTimers.set(peerId, timer);
+			}
+			return;
+		}
+
 		if (peerDisconnectTimers.has(peerId)) {
 			clearTimeout(peerDisconnectTimers.get(peerId));
 			peerDisconnectTimers.delete(peerId);
 		}
 
-		if (["failed", "closed"].includes(pc.connectionState)) {
+		clearPeerIceRecoveryTimer(peerId);
+		peerIceRestartAttempts.delete(peerId);
+
+		if (pc.connectionState === "closed") {
 			removePeer(peerId);
 		}
 	};
