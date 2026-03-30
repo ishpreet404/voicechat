@@ -19,6 +19,10 @@ const statusText = document.getElementById("statusText");
 const participantsList = document.getElementById("participants");
 const screensGrid = document.getElementById("screensGrid");
 const screensEmpty = document.getElementById("screensEmpty");
+const participantCount = document.getElementById("participantCount");
+const chatMessages = document.getElementById("chatMessages");
+const chatInput = document.getElementById("chatInput");
+const chatSendBtn = document.getElementById("chatSendBtn");
 
 let socket;
 let localStream;
@@ -132,6 +136,105 @@ function sanitizeName(value) {
 
 function sanitizeRoom(value) {
 	return value.trim().slice(0, 40);
+}
+
+function sanitizeChatMessage(value) {
+	return String(value || "")
+		.replace(/\s+/g, " ")
+		.trim()
+		.slice(0, 300);
+}
+
+function formatChatTime(timestamp) {
+	const date = new Date(timestamp || Date.now());
+	return date.toLocaleTimeString([], {
+		hour: "2-digit",
+		minute: "2-digit",
+	});
+}
+
+function updateParticipantCount(value = participantState.size) {
+	if (!participantCount) {
+		return;
+	}
+
+	const normalized = Math.max(0, Number(value) || 0);
+	participantCount.textContent = `${normalized} participant${normalized === 1 ? "" : "s"} in room`;
+}
+
+function renderChatEmptyState() {
+	if (!chatMessages) {
+		return;
+	}
+
+	if (chatMessages.children.length > 0) {
+		return;
+	}
+
+	const li = document.createElement("li");
+	li.className = "chat-empty";
+	li.textContent = "No messages yet.";
+	chatMessages.appendChild(li);
+}
+
+function clearChatMessages() {
+	if (!chatMessages) {
+		return;
+	}
+
+	chatMessages.innerHTML = "";
+	renderChatEmptyState();
+}
+
+function appendChatMessage(payload) {
+	if (!chatMessages) {
+		return;
+	}
+
+	const safeMessage = sanitizeChatMessage(payload?.message);
+	if (!safeMessage) {
+		return;
+	}
+
+	const placeholder = chatMessages.querySelector(".chat-empty");
+	if (placeholder) {
+		placeholder.remove();
+	}
+
+	const li = document.createElement("li");
+	li.className = "chat-message";
+
+	if (payload?.fromId && payload.fromId === socket?.id) {
+		li.classList.add("self");
+	}
+
+	const author = document.createElement("strong");
+	author.textContent = payload?.fromName || "Guest";
+
+	const message = document.createElement("p");
+	message.textContent = safeMessage;
+
+	const time = document.createElement("time");
+	time.className = "chat-time";
+	time.textContent = formatChatTime(payload?.at);
+
+	li.appendChild(author);
+	li.appendChild(message);
+	li.appendChild(time);
+	chatMessages.appendChild(li);
+	chatMessages.scrollTop = chatMessages.scrollHeight;
+}
+
+function renderChatHistory(messages) {
+	if (!chatMessages) {
+		return;
+	}
+
+	chatMessages.innerHTML = "";
+	for (const item of messages || []) {
+		appendChatMessage(item);
+	}
+	renderChatEmptyState();
 }
 
 function hostLooksLikeIpv4Address(host) {
@@ -428,6 +531,8 @@ function updateParticipantList() {
 		li.textContent = "No one is here yet.";
 		participantsList.appendChild(li);
 	}
+
+	updateParticipantCount(entries.length);
 }
 
 function setStatus(message) {
@@ -670,6 +775,10 @@ function resetConnectionState() {
 	shareBtn.textContent = "Share Screen";
 	shareBtn.setAttribute("aria-pressed", "false");
 	currentRoomId = "";
+	if (chatInput) {
+		chatInput.value = "";
+	}
+	clearChatMessages();
 	setJoinInProgress(false);
 	updateScreensEmptyState();
 	updateParticipantList();
@@ -915,6 +1024,7 @@ async function joinRoom() {
 			initialConnectDone = true;
 			currentRoomId = roomId;
 			participantState.clear();
+			clearChatMessages();
 			participantState.set(socket.id, {
 				userName,
 				muted: localMuted,
@@ -979,6 +1089,18 @@ async function joinRoom() {
 			}
 
 			updateParticipantList();
+		});
+
+		socket.on("room-meta", ({ participantCount: count }) => {
+			updateParticipantCount(count);
+		});
+
+		socket.on("chat-history", ({ messages }) => {
+			renderChatHistory(messages);
+		});
+
+		socket.on("chat-message", (payload) => {
+			appendChatMessage(payload);
 		});
 
 		socket.on(
@@ -1250,6 +1372,26 @@ async function toggleScreenShare() {
 	await startScreenShare();
 }
 
+function sendChatMessage() {
+	if (!chatInput) {
+		return;
+	}
+
+	if (!socket || !currentRoomId) {
+		setStatus("Join a room before sending chat messages.");
+		return;
+	}
+
+	const message = sanitizeChatMessage(chatInput.value);
+	if (!message) {
+		return;
+	}
+
+	socket.emit("chat-message", { message });
+	chatInput.value = "";
+	chatInput.focus();
+}
+
 function leaveRoom() {
 	resetConnectionState();
 	joinPanel.classList.remove("hidden");
@@ -1302,6 +1444,23 @@ shareBtn.addEventListener("click", () => {
 	});
 });
 
+if (chatSendBtn) {
+	chatSendBtn.addEventListener("click", () => {
+		sendChatMessage();
+	});
+}
+
+if (chatInput) {
+	chatInput.addEventListener("keydown", (event) => {
+		if (event.key !== "Enter" || event.shiftKey) {
+			return;
+		}
+
+		event.preventDefault();
+		sendChatMessage();
+	});
+}
+
 leaveBtn.addEventListener("click", () => {
 	leaveRoom();
 });
@@ -1323,6 +1482,7 @@ nameInput.value = `Guest-${Math.random().toString(36).slice(2, 5)}`;
 muteBtn.setAttribute("aria-pressed", "false");
 deafenBtn.setAttribute("aria-pressed", "false");
 shareBtn.setAttribute("aria-pressed", "false");
+clearChatMessages();
 updateScreensEmptyState();
 updateParticipantList();
 initializeBackendConfig().catch(() => {

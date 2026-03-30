@@ -87,6 +87,9 @@
 					<div>
 						<p class="eyebrow">CONNECTED ROOM</p>
 						<h2 id="activeRoom">room-id</h2>
+						<p id="participantCount" class="hint room-meta">
+							0 participants in room
+						</p>
 					</div>
 					<div class="controls">
 						<button id="muteBtn" class="warn" type="button">Mute</button>
@@ -105,6 +108,23 @@
 				</p>
 
 				<ul id="participants" class="participant-list"></ul>
+
+				<section class="chat">
+					<div class="chat-head">
+						<p class="eyebrow">ROOM CHAT</p>
+					</div>
+					<ul id="chatMessages" class="chat-messages" aria-live="polite">
+						<li class="chat-empty">No messages yet.</li>
+					</ul>
+					<div class="chat-compose">
+						<input
+							id="chatInput"
+							maxlength="300"
+							placeholder="Write a quick message to everyone..."
+						/>
+						<button id="chatSendBtn" class="ghost" type="button">Send</button>
+					</div>
+				</section>
 
 				<section class="screens">
 					<div class="screens-head">

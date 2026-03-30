@@ -38,6 +38,66 @@ const DEFAULT_STUN_URLS = [
 ];
 
 const rooms = new Map();
+const roomMessages = new Map();
+const ROOM_CHAT_HISTORY_LIMIT = 60;
+
+function ensureRoom(roomId) {
+	if (!rooms.has(roomId)) {
+		rooms.set(roomId, new Map());
+	}
+
+	return rooms.get(roomId);
+}
+
+function ensureRoomMessages(roomId) {
+	if (!roomMessages.has(roomId)) {
+		roomMessages.set(roomId, []);
+	}
+
+	return roomMessages.get(roomId);
+}
+
+function sanitizeChatMessage(value) {
+	return String(value || "")
+		.replace(/\s+/g, " ")
+		.trim()
+		.slice(0, 300);
+}
+
+function leaveCurrentRoom(socket, roomId) {
+	if (!roomId || !rooms.has(roomId)) {
+		return;
+	}
+
+	const room = rooms.get(roomId);
+	if (!room.has(socket.id)) {
+		return;
+	}
+
+	room.delete(socket.id);
+	socket.leave(roomId);
+
+	socket.to(roomId).emit("peer-left", {
+		id: socket.id,
+	});
+
+	socket.to(roomId).emit("room-meta", {
+		participantCount: room.size,
+	});
+
+	if (room.size === 0) {
+		rooms.delete(roomId);
+		roomMessages.delete(roomId);
+	}
+}
+
+function isValidSignalTarget(roomId, targetSocketId) {
+	if (!roomId || !rooms.has(roomId)) {
+		return false;
+	}
+
+	return rooms.get(roomId).has(targetSocketId);
+}
 
 app.use(express.static(path.join(__dirname, "public")));
 
@@ -102,20 +162,24 @@ io.on("connection", (socket) => {
 				.trim()
 				.slice(0, 32) || "Guest";
 
+		const previousRoomId = socket.data.roomId;
+		if (previousRoomId && previousRoomId !== safeRoomId) {
+			leaveCurrentRoom(socket, previousRoomId);
+		}
+
 		socket.data.roomId = safeRoomId;
 		socket.data.userName = safeUserName;
 
-		if (!rooms.has(safeRoomId)) {
-			rooms.set(safeRoomId, new Map());
-		}
-
-		const room = rooms.get(safeRoomId);
-		const participants = [...room.entries()].map(([id, user]) => ({
-			id,
-			userName: user.userName,
-			muted: user.muted,
-			sharing: user.sharing,
-		}));
+		const room = ensureRoom(safeRoomId);
+		const alreadyInRoom = room.has(socket.id);
+		const participants = [...room.entries()]
+			.filter(([id]) => id !== socket.id)
+			.map(([id, user]) => ({
+				id,
+				userName: user.userName,
+				muted: user.muted,
+				sharing: user.sharing,
+			}));
 
 		room.set(socket.id, {
 			userName: safeUserName,
@@ -129,15 +193,34 @@ io.on("connection", (socket) => {
 			participants,
 		});
 
-		socket.to(safeRoomId).emit("peer-joined", {
-			id: socket.id,
-			userName: safeUserName,
-			muted: false,
-			sharing: false,
+		socket.emit("chat-history", {
+			messages: [...ensureRoomMessages(safeRoomId)],
+		});
+
+		socket.emit("room-meta", {
+			participantCount: room.size,
+		});
+
+		if (!alreadyInRoom) {
+			socket.to(safeRoomId).emit("peer-joined", {
+				id: socket.id,
+				userName: safeUserName,
+				muted: false,
+				sharing: false,
+			});
+		}
+
+		socket.to(safeRoomId).emit("room-meta", {
+			participantCount: room.size,
 		});
 	});
 
 	socket.on("signal-offer", ({ to, offer }) => {
+		const roomId = socket.data.roomId;
+		if (!isValidSignalTarget(roomId, to)) {
+			return;
+		}
+
 		io.to(to).emit("signal-offer", {
 			from: socket.id,
 			fromName: socket.data.userName,
@@ -146,6 +229,11 @@ io.on("connection", (socket) => {
 	});
 
 	socket.on("signal-answer", ({ to, answer }) => {
+		const roomId = socket.data.roomId;
+		if (!isValidSignalTarget(roomId, to)) {
+			return;
+		}
+
 		io.to(to).emit("signal-answer", {
 			from: socket.id,
 			answer,
@@ -153,10 +241,43 @@ io.on("connection", (socket) => {
 	});
 
 	socket.on("signal-ice-candidate", ({ to, candidate }) => {
+		const roomId = socket.data.roomId;
+		if (!isValidSignalTarget(roomId, to)) {
+			return;
+		}
+
 		io.to(to).emit("signal-ice-candidate", {
 			from: socket.id,
 			candidate,
 		});
+	});
+
+	socket.on("chat-message", ({ message }) => {
+		const roomId = socket.data.roomId;
+		if (!roomId || !rooms.has(roomId)) {
+			return;
+		}
+
+		const safeMessage = sanitizeChatMessage(message);
+		if (!safeMessage) {
+			return;
+		}
+
+		const payload = {
+			id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+			fromId: socket.id,
+			fromName: socket.data.userName || "Guest",
+			message: safeMessage,
+			at: Date.now(),
+		};
+
+		const messages = ensureRoomMessages(roomId);
+		messages.push(payload);
+		if (messages.length > ROOM_CHAT_HISTORY_LIMIT) {
+			messages.splice(0, messages.length - ROOM_CHAT_HISTORY_LIMIT);
+		}
+
+		io.to(roomId).emit("chat-message", payload);
 	});
 
 	socket.on("mute-state-changed", ({ muted }) => {
@@ -197,20 +318,7 @@ io.on("connection", (socket) => {
 
 	socket.on("disconnect", () => {
 		const roomId = socket.data.roomId;
-		if (!roomId || !rooms.has(roomId)) {
-			return;
-		}
-
-		const room = rooms.get(roomId);
-		room.delete(socket.id);
-
-		socket.to(roomId).emit("peer-left", {
-			id: socket.id,
-		});
-
-		if (room.size === 0) {
-			rooms.delete(roomId);
-		}
+		leaveCurrentRoom(socket, roomId);
 	});
 });
 

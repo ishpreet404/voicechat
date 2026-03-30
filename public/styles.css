@@ -308,12 +308,93 @@ input:focus-visible {
   color: var(--ink-soft);
 }
 
+.room-meta {
+  margin-top: 0.3rem;
+}
+
 .participant-list {
   list-style: none;
   margin: 0;
   padding: 0;
   display: grid;
   gap: 0.55rem;
+}
+
+.chat {
+  margin-top: 1rem;
+  border-top: 1px solid var(--line);
+  padding-top: 0.95rem;
+  display: grid;
+  gap: 0.6rem;
+}
+
+.chat-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.chat-messages {
+  list-style: none;
+  margin: 0;
+  padding: 0.6rem;
+  min-height: 84px;
+  max-height: 220px;
+  overflow-y: auto;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: rgba(25, 29, 41, 0.74);
+  display: grid;
+  gap: 0.45rem;
+}
+
+.chat-empty {
+  margin: 0;
+  color: var(--ink-soft);
+  font-size: 0.86rem;
+}
+
+.chat-message {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 0.45rem 0.55rem;
+  background: rgba(32, 37, 51, 0.85);
+  display: grid;
+  gap: 0.2rem;
+}
+
+.chat-message.self {
+  border-color: rgba(88, 101, 242, 0.55);
+  background: rgba(88, 101, 242, 0.15);
+}
+
+.chat-message strong {
+  font-size: 0.82rem;
+  color: #cfd7ff;
+}
+
+.chat-message p {
+  margin: 0;
+  font-size: 0.9rem;
+  line-height: 1.35;
+  word-break: break-word;
+}
+
+.chat-time {
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 0.72rem;
+  color: var(--ink-soft);
+}
+
+.chat-compose {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 0.55rem;
+  align-items: stretch;
+}
+
+.chat-compose .ghost {
+  padding-inline: 0.95rem;
 }
 
 .participant {
@@ -455,6 +536,10 @@ input:focus-visible {
 
   .controls button {
     flex: 1;
+  }
+
+  .chat-compose {
+    grid-template-columns: 1fr;
   }
 }
 
