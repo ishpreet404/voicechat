@@ -125,9 +125,11 @@ CORS_ORIGIN=https://your-project.vercel.app
 3. If signaling works but media still fails, configure TURN relay env vars on Render:
 
 ```text
-TURN_URLS=turn:your-turn-host:3478,turn:your-turn-host:443?transport=tcp
-TURN_USERNAME=your-username
-TURN_CREDENTIAL=your-password
+TURN_URLS=turn:openrelay.metered.ca:80,turn:openrelay.metered.ca:443?transport=tcp
+TURN_USERNAME=openrelayproject
+TURN_CREDENTIAL=openrelayproject
 ```
+
+For production, replace the demo relay values above with your own TURN service credentials.
 
 Without TURN, many mobile/corporate networks block direct WebRTC media.

@@ -47,6 +47,7 @@ const peerIceRecoveryTimers = new Map();
 const pendingIceCandidates = new Map();
 const blockedAudioPeers = new Set();
 const peerIceRestartAttempts = new Map();
+const makingOfferByPeer = new Map();
 let audioUnlockHandlersBound = false;
 let localScreenCard;
 
@@ -455,6 +456,70 @@ function startBackendHealthMonitor() {
 	}, BACKEND_HEALTH_CHECK_INTERVAL_MS);
 }
 
+function isPolitePeer(peerId) {
+	if (!socket?.id) {
+		return true;
+	}
+
+	return socket.id.localeCompare(peerId) > 0;
+}
+
+async function waitForStableSignalingState(pc, timeoutMs = 2500) {
+	const startedAt = Date.now();
+
+	while (pc.signalingState !== "stable") {
+		if (pc.signalingState === "closed") {
+			return false;
+		}
+
+		if (Date.now() - startedAt >= timeoutMs) {
+			return false;
+		}
+
+		await new Promise((resolve) => {
+			setTimeout(resolve, 60);
+		});
+	}
+
+	return true;
+}
+
+async function createAndSendOffer(peerId, pc, { iceRestart = false } = {}) {
+	if (!socket || !pc || pc.signalingState === "closed") {
+		return false;
+	}
+
+	if (makingOfferByPeer.get(peerId)) {
+		return false;
+	}
+	makingOfferByPeer.set(peerId, true);
+
+	try {
+		const isStable = await waitForStableSignalingState(pc);
+		if (!isStable || pc.signalingState !== "stable") {
+			return false;
+		}
+
+		const offer = iceRestart
+			? await pc.createOffer({ iceRestart: true })
+			: await pc.createOffer();
+
+		await pc.setLocalDescription(offer);
+
+		socket.emit("signal-offer", {
+			to: peerId,
+			offer,
+		});
+
+		return true;
+	} catch (error) {
+		console.warn(`Offer creation failed for peer ${peerId}:`, error);
+		return false;
+	} finally {
+		makingOfferByPeer.delete(peerId);
+	}
+}
+
 async function attemptIceRestart(peerId, pc, reason) {
 	if (!socket || !pc || pc.signalingState === "closed") {
 		return;
@@ -474,21 +539,23 @@ async function attemptIceRestart(peerId, pc, reason) {
 		return;
 	}
 
-	peerIceRestartAttempts.set(peerId, attempts + 1);
+	const nextAttempt = attempts + 1;
 	setStatus(
-		`Network recovery in progress (${attempts + 1}/${MAX_ICE_RESTART_ATTEMPTS})...`,
+		`Network recovery in progress (${nextAttempt}/${MAX_ICE_RESTART_ATTEMPTS})...`,
 	);
 
-	try {
-		const offer = await pc.createOffer({ iceRestart: true });
-		await pc.setLocalDescription(offer);
-		socket.emit("signal-offer", {
-			to: peerId,
-			offer,
-		});
-	} catch (error) {
-		console.warn(`ICE restart failed (${reason}) for peer ${peerId}:`, error);
+	const restartSent = await createAndSendOffer(peerId, pc, {
+		iceRestart: true,
+	});
+
+	if (!restartSent) {
+		console.warn(
+			`ICE restart delayed (${reason}) for peer ${peerId}; signaling state is ${pc.signalingState}.`,
+		);
+		return;
 	}
+
+	peerIceRestartAttempts.set(peerId, nextAttempt);
 }
 
 function queuePendingIceCandidate(peerId, candidate) {
@@ -515,6 +582,11 @@ async function flushPendingIceCandidates(peerId, pc) {
 		try {
 			await pc.addIceCandidate(new RTCIceCandidate(candidate));
 		} catch (error) {
+			const message = String(error?.message || "");
+			if (/Unknown ufrag/i.test(message)) {
+				continue;
+			}
+
 			console.warn("Queued ICE candidate error:", error);
 		}
 	}
@@ -745,12 +817,7 @@ function ensureRemoteScreenCard(peerId, peerName) {
 }
 
 async function renegotiatePeer(peerId, pc) {
-	const offer = await pc.createOffer();
-	await pc.setLocalDescription(offer);
-	socket.emit("signal-offer", {
-		to: peerId,
-		offer,
-	});
+	await createAndSendOffer(peerId, pc);
 }
 
 function applyRemoteAudioState() {
@@ -848,6 +915,7 @@ function resetConnectionState() {
 	pendingIceCandidates.clear();
 	blockedAudioPeers.clear();
 	peerIceRestartAttempts.clear();
+	makingOfferByPeer.clear();
 	detachAudioUnlockHandlers();
 	for (const [, card] of remoteScreenCards) {
 		card.remove();
@@ -928,6 +996,7 @@ function removePeer(peerId) {
 	pendingIceCandidates.delete(peerId);
 	blockedAudioPeers.delete(peerId);
 	peerIceRestartAttempts.delete(peerId);
+	makingOfferByPeer.delete(peerId);
 	if (blockedAudioPeers.size === 0) {
 		detachAudioUnlockHandlers();
 	}
@@ -1293,13 +1362,7 @@ async function joinRoom() {
 				updateParticipantList();
 
 				const pc = createPeerConnection(id, peerName);
-				const offer = await pc.createOffer();
-				await pc.setLocalDescription(offer);
-
-				socket.emit("signal-offer", {
-					to: id,
-					offer,
-				});
+				await createAndSendOffer(id, pc);
 
 				setStatus(`${peerName} joined the room.`);
 			},
@@ -1307,15 +1370,34 @@ async function joinRoom() {
 
 		socket.on("signal-offer", async ({ from, fromName, offer }) => {
 			const pc = createPeerConnection(from, fromName);
-			await pc.setRemoteDescription(new RTCSessionDescription(offer));
-			await flushPendingIceCandidates(from, pc);
-			const answer = await pc.createAnswer();
-			await pc.setLocalDescription(answer);
 
-			socket.emit("signal-answer", {
-				to: from,
-				answer,
-			});
+			try {
+				const offerCollision =
+					offer?.type === "offer" &&
+					(makingOfferByPeer.get(from) ||
+						pc.signalingState === "have-local-offer");
+
+				if (offerCollision && !isPolitePeer(from)) {
+					console.warn(`Ignoring collided offer from ${from}.`);
+					return;
+				}
+
+				if (offerCollision && pc.signalingState === "have-local-offer") {
+					await pc.setLocalDescription({ type: "rollback" });
+				}
+
+				await pc.setRemoteDescription(new RTCSessionDescription(offer));
+				await flushPendingIceCandidates(from, pc);
+				const answer = await pc.createAnswer();
+				await pc.setLocalDescription(answer);
+
+				socket.emit("signal-answer", {
+					to: from,
+					answer,
+				});
+			} catch (error) {
+				console.warn(`Offer handling error for peer ${from}:`, error);
+			}
 		});
 
 		socket.on("signal-answer", async ({ from, answer }) => {
@@ -1324,8 +1406,19 @@ async function joinRoom() {
 				return;
 			}
 
-			await pc.setRemoteDescription(new RTCSessionDescription(answer));
-			await flushPendingIceCandidates(from, pc);
+			if (pc.signalingState !== "have-local-offer") {
+				console.warn(
+					`Ignoring stale answer from ${from} while in signaling state ${pc.signalingState}.`,
+				);
+				return;
+			}
+
+			try {
+				await pc.setRemoteDescription(new RTCSessionDescription(answer));
+				await flushPendingIceCandidates(from, pc);
+			} catch (error) {
+				console.warn(`Answer handling error for peer ${from}:`, error);
+			}
 		});
 
 		socket.on("signal-ice-candidate", async ({ from, candidate }) => {
@@ -1343,6 +1436,12 @@ async function joinRoom() {
 			try {
 				await pc.addIceCandidate(new RTCIceCandidate(candidate));
 			} catch (error) {
+				const message = String(error?.message || "");
+				if (/Unknown ufrag/i.test(message)) {
+					console.warn(`Ignoring stale ICE candidate from ${from}: ${message}`);
+					return;
+				}
+
 				console.error("ICE candidate error:", error);
 			}
 		});

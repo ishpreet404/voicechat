@@ -95,6 +95,10 @@ test.before(async () => {
 			...process.env,
 			PORT: String(testPort),
 			KEEP_ALIVE_ENABLED: "false",
+			TURN_URLS:
+				"turn:relay.example.com:3478,turn:relay.example.com:443?transport=tcp",
+			TURN_USERNAME: "demo-user",
+			TURN_CREDENTIAL: "demo-pass",
 		},
 		stdio: ["ignore", "pipe", "pipe"],
 	});
@@ -138,6 +142,27 @@ test("rtc-config includes multiple STUN URLs", async () => {
 	assert.ok(payload.iceServers.length >= 1);
 	assert.ok(Array.isArray(payload.iceServers[0].urls));
 	assert.ok(payload.iceServers[0].urls.length >= 4);
+});
+
+test("rtc-config includes configured TURN relay", async () => {
+	const response = await fetch(`${baseUrl}/rtc-config`, { cache: "no-store" });
+	assert.equal(response.status, 200);
+
+	const payload = await response.json();
+	const turnEntry = payload.iceServers.find((server) => {
+		const urls = Array.isArray(server?.urls) ? server.urls : [server?.urls];
+		return urls.some((url) => String(url || "").startsWith("turn:"));
+	});
+
+	assert.ok(turnEntry, "Expected TURN entry in rtc-config response");
+
+	const turnUrls = Array.isArray(turnEntry.urls)
+		? turnEntry.urls
+		: [turnEntry.urls];
+	assert.ok(turnUrls.includes("turn:relay.example.com:3478"));
+	assert.ok(turnUrls.includes("turn:relay.example.com:443?transport=tcp"));
+	assert.equal(turnEntry.username, "demo-user");
+	assert.equal(turnEntry.credential, "demo-pass");
 });
 
 test("chat message is sanitized, broadcast, and replayed in history", async (t) => {

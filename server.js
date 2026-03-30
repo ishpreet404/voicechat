@@ -105,12 +105,24 @@ const TURN_URLS = (process.env.TURN_URLS || "")
 	.filter(Boolean);
 const TURN_USERNAME = String(process.env.TURN_USERNAME || "").trim();
 const TURN_CREDENTIAL = String(process.env.TURN_CREDENTIAL || "").trim();
+const TURN_HAS_USERNAME = Boolean(TURN_USERNAME);
+const TURN_HAS_CREDENTIAL = Boolean(TURN_CREDENTIAL);
+const TURN_HAS_FULL_CREDENTIALS = TURN_HAS_USERNAME && TURN_HAS_CREDENTIAL;
+const TURN_HAS_PARTIAL_CREDENTIALS =
+	(TURN_HAS_USERNAME && !TURN_HAS_CREDENTIAL) ||
+	(!TURN_HAS_USERNAME && TURN_HAS_CREDENTIAL);
 const DEFAULT_STUN_URLS = [
 	"stun:stun.l.google.com:19302",
 	"stun:stun1.l.google.com:19302",
 	"stun:stun2.l.google.com:19302",
 	"stun:stun3.l.google.com:19302",
 ];
+
+if (TURN_URLS.length && TURN_HAS_PARTIAL_CREDENTIALS) {
+	console.warn(
+		"TURN_URLS has partial credentials. Provide both TURN_USERNAME and TURN_CREDENTIAL, or neither for no-auth TURN.",
+	);
+}
 
 const rooms = new Map();
 const roomMessages = new Map();
@@ -205,12 +217,17 @@ app.get("/health", (_req, res) => {
 app.get("/rtc-config", (_req, res) => {
 	const iceServers = [{ urls: DEFAULT_STUN_URLS }];
 
-	if (TURN_URLS.length && TURN_USERNAME && TURN_CREDENTIAL) {
-		iceServers.push({
+	if (TURN_URLS.length) {
+		const turnServer = {
 			urls: TURN_URLS,
-			username: TURN_USERNAME,
-			credential: TURN_CREDENTIAL,
-		});
+		};
+
+		if (TURN_HAS_FULL_CREDENTIALS) {
+			turnServer.username = TURN_USERNAME;
+			turnServer.credential = TURN_CREDENTIAL;
+		}
+
+		iceServers.push(turnServer);
 	}
 
 	res.status(200).json({ iceServers });
