@@ -173,7 +173,11 @@ function getIceServerUrls(iceServers) {
 		}
 	}
 
-	return urls.map((url) => String(url || "").trim().toLowerCase());
+	return urls.map((url) =>
+		String(url || "")
+			.trim()
+			.toLowerCase(),
+	);
 }
 
 function detectRelayIceServer(iceServers) {
@@ -1050,9 +1054,7 @@ function createPeerConnection(peerId, peerName) {
 					return;
 				}
 
-				if (
-					["disconnected", "failed"].includes(currentPc.iceConnectionState)
-				) {
+				if (["disconnected", "failed"].includes(currentPc.iceConnectionState)) {
 					attemptIceRestart(peerId, currentPc, "disconnected").catch(() => {
 						// Recovery errors are handled in attemptIceRestart.
 					});
