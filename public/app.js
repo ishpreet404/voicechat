@@ -39,6 +39,9 @@ const remoteAudioElements = new Map();
 const remoteScreenCards = new Map();
 const participantState = new Map();
 const peerDisconnectTimers = new Map();
+const pendingIceCandidates = new Map();
+const blockedAudioPeers = new Set();
+let audioUnlockHandlersBound = false;
 let localScreenCard;
 
 let rtcConfig = {
@@ -292,6 +295,100 @@ function startBackendHealthMonitor() {
 	}, BACKEND_HEALTH_CHECK_INTERVAL_MS);
 }
 
+function queuePendingIceCandidate(peerId, candidate) {
+	if (!pendingIceCandidates.has(peerId)) {
+		pendingIceCandidates.set(peerId, []);
+	}
+
+	pendingIceCandidates.get(peerId).push(candidate);
+}
+
+async function flushPendingIceCandidates(peerId, pc) {
+	if (!pc.remoteDescription?.type) {
+		return;
+	}
+
+	const queued = pendingIceCandidates.get(peerId);
+	if (!queued?.length) {
+		return;
+	}
+
+	pendingIceCandidates.delete(peerId);
+
+	for (const candidate of queued) {
+		try {
+			await pc.addIceCandidate(new RTCIceCandidate(candidate));
+		} catch (error) {
+			console.warn("Queued ICE candidate error:", error);
+		}
+	}
+}
+
+function detachAudioUnlockHandlers() {
+	if (!audioUnlockHandlersBound) {
+		return;
+	}
+
+	window.removeEventListener("click", retryBlockedRemoteAudioPlayback);
+	window.removeEventListener("touchstart", retryBlockedRemoteAudioPlayback);
+	window.removeEventListener("keydown", retryBlockedRemoteAudioPlayback);
+	audioUnlockHandlersBound = false;
+}
+
+async function retryBlockedRemoteAudioPlayback() {
+	const pending = [...blockedAudioPeers];
+
+	for (const peerId of pending) {
+		const audio = remoteAudioElements.get(peerId);
+		if (!audio) {
+			blockedAudioPeers.delete(peerId);
+			continue;
+		}
+
+		try {
+			await audio.play();
+			blockedAudioPeers.delete(peerId);
+		} catch {
+			// Keep waiting for the next explicit user interaction.
+		}
+	}
+
+	if (blockedAudioPeers.size === 0) {
+		detachAudioUnlockHandlers();
+	}
+}
+
+function ensureAudioUnlockHandlers() {
+	if (audioUnlockHandlersBound) {
+		return;
+	}
+
+	window.addEventListener("click", retryBlockedRemoteAudioPlayback);
+	window.addEventListener("touchstart", retryBlockedRemoteAudioPlayback);
+	window.addEventListener("keydown", retryBlockedRemoteAudioPlayback);
+	audioUnlockHandlersBound = true;
+}
+
+async function playRemoteAudio(peerId, audio) {
+	const wasBlocked = blockedAudioPeers.has(peerId);
+
+	try {
+		await audio.play();
+		blockedAudioPeers.delete(peerId);
+
+		if (blockedAudioPeers.size === 0) {
+			detachAudioUnlockHandlers();
+		}
+	} catch {
+		blockedAudioPeers.add(peerId);
+		ensureAudioUnlockHandlers();
+
+		if (!wasBlocked) {
+			setStatus("Tap once to enable incoming audio.");
+		}
+	}
+}
+
 function updateParticipantList() {
 	const entries = [...participantState.entries()];
 
@@ -538,6 +635,9 @@ function resetConnectionState() {
 	peerConnections.clear();
 	screenSenders.clear();
 	remoteAudioElements.clear();
+	pendingIceCandidates.clear();
+	blockedAudioPeers.clear();
+	detachAudioUnlockHandlers();
 	for (const [, card] of remoteScreenCards) {
 		card.remove();
 	}
@@ -608,6 +708,12 @@ function removePeer(peerId) {
 		remoteAudioElements.delete(peerId);
 	}
 
+	pendingIceCandidates.delete(peerId);
+	blockedAudioPeers.delete(peerId);
+	if (blockedAudioPeers.size === 0) {
+		detachAudioUnlockHandlers();
+	}
+
 	participantState.delete(peerId);
 	removeRemoteScreen(peerId);
 	updateParticipantList();
@@ -669,9 +775,14 @@ function createPeerConnection(peerId, peerName) {
 				: new MediaStream([event.track]);
 		if (event.track.kind === "audio") {
 			const audio = ensureAudioElement(peerId);
-			audio.srcObject = stream;
-			audio.play().catch(() => {
-				// Browser autoplay policies can block this until user gesture.
+			audio.srcObject = new MediaStream([event.track]);
+			event.track.onunmute = () => {
+				playRemoteAudio(peerId, audio).catch(() => {
+					// Playback retry is handled by user interaction hooks.
+				});
+			};
+			playRemoteAudio(peerId, audio).catch(() => {
+				// Playback retry is handled by user interaction hooks.
 			});
 			return;
 		}
@@ -900,6 +1011,7 @@ async function joinRoom() {
 		socket.on("signal-offer", async ({ from, fromName, offer }) => {
 			const pc = createPeerConnection(from, fromName);
 			await pc.setRemoteDescription(new RTCSessionDescription(offer));
+			await flushPendingIceCandidates(from, pc);
 			const answer = await pc.createAnswer();
 			await pc.setLocalDescription(answer);
 
@@ -916,11 +1028,18 @@ async function joinRoom() {
 			}
 
 			await pc.setRemoteDescription(new RTCSessionDescription(answer));
+			await flushPendingIceCandidates(from, pc);
 		});
 
 		socket.on("signal-ice-candidate", async ({ from, candidate }) => {
 			const pc = peerConnections.get(from);
 			if (!pc) {
+				queuePendingIceCandidate(from, candidate);
+				return;
+			}
+
+			if (!pc.remoteDescription?.type) {
+				queuePendingIceCandidate(from, candidate);
 				return;
 			}
 
@@ -1195,6 +1314,8 @@ window.addEventListener("beforeunload", () => {
 	if (backendHealthInterval) {
 		clearInterval(backendHealthInterval);
 	}
+
+	detachAudioUnlockHandlers();
 });
 
 roomInput.value = readRoomIdFromUrl() || getOrCreatePermanentRoomId();

@@ -30,6 +30,12 @@ const TURN_URLS = (process.env.TURN_URLS || "")
 	.filter(Boolean);
 const TURN_USERNAME = String(process.env.TURN_USERNAME || "").trim();
 const TURN_CREDENTIAL = String(process.env.TURN_CREDENTIAL || "").trim();
+const DEFAULT_STUN_URLS = [
+	"stun:stun.l.google.com:19302",
+	"stun:stun1.l.google.com:19302",
+	"stun:stun2.l.google.com:19302",
+	"stun:stun3.l.google.com:19302",
+];
 
 const rooms = new Map();
 
@@ -40,7 +46,7 @@ app.get("/health", (_req, res) => {
 });
 
 app.get("/rtc-config", (_req, res) => {
-	const iceServers = [{ urls: "stun:stun.l.google.com:19302" }];
+	const iceServers = [{ urls: DEFAULT_STUN_URLS }];
 
 	if (TURN_URLS.length && TURN_USERNAME && TURN_CREDENTIAL) {
 		iceServers.push({
